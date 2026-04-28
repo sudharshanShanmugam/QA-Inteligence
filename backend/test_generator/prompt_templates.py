@@ -5,7 +5,7 @@ These are NOT open-ended "generate test cases" prompts.
 They pass structured analytical data and ask LLM to format it into human output.
 """
 
-SYSTEM_PROMPT = """You are a Senior QA Architect with 15+ years of experience.
+SYSTEM_PROMPT = """You are a Senior QA Architect with 25+ years of experience.
 You have been given structured analytical data from three sources:
 1. Knowledge Graph (entity dependencies, bugs, test cases)
 2. Analytical Engine (BVA, EP, State Transition, Risk scores)
@@ -48,6 +48,7 @@ PAST BUG WARNINGS:
 {warnings}
 
 Rules:
+- Generate UP TO {gherkin_limit} Gherkin scenarios (scale depth to match the number)
 - Use Given/When/Then structure
 - Each scenario must have a clear title
 - Use @tags for: @smoke, @regression, @negative, @edge, @security, @high-risk
@@ -65,7 +66,7 @@ BVA OUTPUT: {bva_results}
 EQUIVALENCE CLASSES: {ep_results}
 STATE MACHINE: {state_machine}
 
-Identify 5-10 critical edge cases. For each:
+Identify exactly {edge_count} edge cases (no more, no less). For each:
 - Title
 - Condition that triggers it
 - Expected behaviour

@@ -13,7 +13,7 @@ log = structlog.get_logger()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("qa_intelligence_starting", model=settings.OLLAMA_MODEL)
+    log.info("qa_intelligence_starting", model=settings.LLM_MODEL)
     yield
     log.info("qa_intelligence_stopped")
 
@@ -40,4 +40,4 @@ app.include_router(generate_tests.router, prefix="/generate-tests", tags=["Test 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": settings.OLLAMA_MODEL, "neo4j": settings.USE_NEO4J}
+    return {"status": "ok", "model": settings.LLM_MODEL, "neo4j": settings.USE_NEO4J}

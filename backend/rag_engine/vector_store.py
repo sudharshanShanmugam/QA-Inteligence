@@ -33,10 +33,13 @@ class VectorStore:
 
     def _get_embeddings(self) -> Any:
         if self._embeddings is None:
-            from langchain_ollama import OllamaEmbeddings
-            self._embeddings = OllamaEmbeddings(
-                base_url=settings.OLLAMA_BASE_URL,
-                model=settings.OLLAMA_EMBED_MODEL,
+            from langchain_openai import OpenAIEmbeddings
+            self._embeddings = OpenAIEmbeddings(
+                openai_api_key=settings.DEEPINFRA_API_KEY,
+                openai_api_base=settings.DEEPINFRA_BASE_URL,
+                model=settings.EMBED_MODEL,
+                check_embedding_ctx_length=False,
+                tiktoken_enabled=False,
             )
         return self._embeddings
 
@@ -46,22 +49,12 @@ class VectorStore:
         if not chunks:
             return 0
 
-        texts = [c["text"] for c in chunks]
-        ids = [f"{c['source_id']}_chunk_{c['chunk_index']}" for c in chunks]
-        metadatas = [c["metadata"] for c in chunks]
+        texts = [str(c["text"]) for c in chunks if c.get("text")]
+        ids = [f"{c['source_id']}_chunk_{c['chunk_index']}" for c in chunks if c.get("text")]
+        metadatas = [c["metadata"] for c in chunks if c.get("text")]
 
-        try:
-            embeddings_model = self._get_embeddings()
-            vectors = embeddings_model.embed_documents(texts)
-        except Exception as e:
-            log.warning("embedding_failed_using_fallback", error=str(e))
-            # Fallback: store without embeddings (text-only)
-            self._collection.upsert(
-                ids=ids,
-                documents=texts,
-                metadatas=metadatas,
-            )
-            return len(chunks)
+        embeddings_model = self._get_embeddings()
+        vectors = embeddings_model.embed_documents(texts)
 
         self._collection.upsert(
             ids=ids,

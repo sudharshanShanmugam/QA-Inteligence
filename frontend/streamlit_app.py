@@ -17,7 +17,7 @@ API_BASE = "http://localhost:8000"
 
 st.set_page_config(
     page_title="QA Intelligence System",
-    page_icon="🧠",
+    page_icon=None,
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -62,13 +62,13 @@ def _load_sample_data(sample_dir: Path):
                     timeout=60,
                 )
                 if resp.status_code == 200:
-                    results.append(f"✅ {fname}")
+                    results.append(f"[OK] {fname}")
                 else:
-                    results.append(f"❌ {fname}: {resp.text[:80]}")
+                    results.append(f"[FAIL] {fname}: {resp.text[:80]}")
             except Exception as e:
-                results.append(f"❌ {fname}: {str(e)}")
+                results.append(f"[FAIL] {fname}: {str(e)}")
         else:
-            results.append(f"⚠️ {fname} not found")
+            results.append(f"[WARN] {fname} not found")
         progress.progress((i + 1) / len(files))
 
     bug_file = sample_dir / "bug_history_sample.json"
@@ -84,7 +84,7 @@ def _load_sample_data(sample_dir: Path):
                 )
             except Exception:
                 pass
-        results.append(f"✅ bug_history_sample.json ({len(bugs)} bugs)")
+        results.append(f"[OK] bug_history_sample.json ({len(bugs)} bugs)")
 
     st.success("\n".join(results))
 
@@ -92,58 +92,66 @@ def _load_sample_data(sample_dir: Path):
 def _render_results(result: dict):
     st.divider()
 
-    with st.expander("📋 SECTION 1: Feature Understanding", expanded=True):
+    complexity = result.get("complexity_level", "moderate")
+    complexity_colors = {"simple": "#d4edda", "moderate": "#fff3cd", "complex": "#f8d7da"}
+    complexity_bg = complexity_colors.get(complexity, "#fff3cd")
+    st.markdown(
+        f'<div style="background:{complexity_bg}; padding:8px 14px; border-radius:6px; '
+        f'margin-bottom:10px; color:#000; font-weight:bold;">'
+        f'Feature Complexity: {complexity.upper()}</div>',
+        unsafe_allow_html=True,
+    )
+
+    with st.expander("SECTION 1: Feature Understanding", expanded=True):
         st.markdown(result.get("feature_understanding", "N/A"))
 
-    with st.expander("🏗️ SECTION 2: Impacted Modules", expanded=True):
+    with st.expander("SECTION 2: Impacted Modules", expanded=True):
         modules = result.get("impacted_modules", [])
         if modules:
             for m in modules:
                 impact = m.get("impact_type", "DIRECT")
                 crit = m.get("criticality", 3)
-                color = "🔴" if impact == "DIRECT" else "🟡"
-                st.markdown(f"{color} **{m.get('name', 'Unknown')}** | Impact: `{impact}` | Criticality: `{crit}/5`")
+                tag = "[DIRECT]" if impact == "DIRECT" else "[INDIRECT]"
+                st.markdown(f"{tag} **{m.get('name', 'Unknown')}** | Impact: `{impact}` | Criticality: `{crit}/5`")
         else:
             st.info("No specific module data in knowledge graph – ingest module documentation first.")
 
-    with st.expander("🔄 SECTION 3: End-to-End Event Flow", expanded=False):
+    with st.expander("SECTION 3: End-to-End Event Flow", expanded=False):
         flow = result.get("event_flow", [])
         if flow:
             for step in flow:
                 layer = step.get("layer", "")
-                emoji = {"UI": "🖥️", "API": "⚡", "DB": "🗄️", "Event": "📨", "Consumer": "⚙️", "Notification": "🔔"}.get(layer, "→")
-                st.markdown(f"**{emoji} [{layer}]** `{step.get('component', '')}` — {step.get('action', '')}")
-                st.caption(f"✅ Validate: {step.get('validation_point', '')}")
+                st.markdown(f"**[{layer}]** `{step.get('component', '')}` — {step.get('action', '')}")
+                st.caption(f"Validate: {step.get('validation_point', '')}")
                 st.divider()
 
-    with st.expander("⚠️ SECTION 4: Risk Areas", expanded=True):
+    with st.expander("SECTION 4: Risk Areas", expanded=True):
         risks = result.get("risk_areas", [])
         if risks:
             for r in risks:
                 prio = r.get("priority", "P4")
                 score = r.get("risk_score", 0)
-                color = {"P1": "🔴", "P2": "🟠", "P3": "🟡", "P4": "🟢"}.get(prio, "🟢")
-                st.markdown(f"{color} **{prio}** — {r.get('feature', r.get('module', ''))} | Score: `{score:.2f}`")
+                st.markdown(f"**{prio}** — {r.get('feature', r.get('module', ''))} | Score: `{score:.2f}`")
                 for reason in r.get("reasons", []):
                     st.caption(f"  • {reason}")
                 st.caption(f"  Past bugs: {r.get('past_bug_count', 0)}")
 
-    with st.expander(f"🚨 SECTION 5: HEADS-UP Warnings ({len(result.get('heads_up_warnings', []))})", expanded=True):
+    with st.expander(f"SECTION 5: HEADS-UP Warnings ({len(result.get('heads_up_warnings', []))})", expanded=True):
         warnings = result.get("heads_up_warnings", [])
         if warnings:
             for w in warnings:
                 sev = w.get("severity", "").lower()
                 bg = {"critical": "#ffcccc", "blocker": "#ffcccc", "high": "#ffe4cc"}.get(sev, "#fff9cc")
                 st.markdown(f"""
-                <div style="background:{bg}; padding:10px; border-radius:6px; margin-bottom:8px;">
-                    <strong>⚠️ {w.get('warning', '')}</strong><br/>
+                <div style="background:{bg}; padding:10px; border-radius:6px; margin-bottom:8px; color:#000000;">
+                    <strong>{w.get('warning', '')}</strong><br/>
                     <em>Bug: {w.get('bug_title', 'N/A')} ({w.get('severity', '?')})</em><br/>
-                    💡 {w.get('recommendation', '')}
+                    {w.get('recommendation', '')}
                 </div>""", unsafe_allow_html=True)
         else:
             st.success("No pattern-matched warnings.")
 
-    with st.expander(f"🧪 SECTION 6: Test Scenarios ({len(result.get('test_scenarios', []))})", expanded=False):
+    with st.expander(f"SECTION 6: Test Scenarios ({len(result.get('test_scenarios', []))})", expanded=False):
         scenarios = result.get("test_scenarios", [])
         type_filter = st.multiselect(
             "Filter by type",
@@ -154,8 +162,8 @@ def _render_results(result: dict):
         filtered = [s for s in scenarios if not type_filter or s.get("type") in type_filter]
         for s in filtered[:30]:
             stype = s.get("type", "").replace("_", " ").upper()
-            risk_color = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(s.get("risk_level", "low"), "⚪")
-            with st.expander(f"{risk_color} [{stype}] {s.get('id', '')} – {s.get('title', '')[:80]}", expanded=False):
+            risk_level = s.get("risk_level", "low").upper()
+            with st.expander(f"[{risk_level}] [{stype}] {s.get('id', '')} – {s.get('title', '')[:80]}", expanded=False):
                 st.caption(f"Traceability: {s.get('traceability', 'N/A')}")
                 if s.get("preconditions"):
                     st.markdown("**Preconditions:**")
@@ -166,7 +174,7 @@ def _render_results(result: dict):
                     st.markdown(f"  {i}. {step}")
                 st.markdown(f"**Expected:** {s.get('expected_result', '')}")
 
-    with st.expander(f"🥒 SECTION 7: Gherkin Test Cases ({len(result.get('gherkin_test_cases', []))})", expanded=False):
+    with st.expander(f"SECTION 7: Gherkin Test Cases ({len(result.get('gherkin_test_cases', []))})", expanded=False):
         for g in result.get("gherkin_test_cases", []):
             tags = " ".join(g.get("tags", []))
             given = "\n".join(f"  {line}" for line in g.get("given", []))
@@ -174,31 +182,31 @@ def _render_results(result: dict):
             then  = "\n".join(f"  {line}" for line in g.get("then", []))
             st.code(f"{tags}\nScenario: {g.get('scenario_title', '')}\n{given}\n{when}\n{then}", language="gherkin")
 
-    with st.expander(f"🔁 SECTION 8: Regression Suite ({len(result.get('regression_suite', []))})", expanded=False):
+    with st.expander(f"SECTION 8: Regression Suite ({len(result.get('regression_suite', []))})", expanded=False):
         regression = result.get("regression_suite", [])
         if regression:
             must = [r for r in regression if r.get("priority") == "MUST-RUN"]
             should = [r for r in regression if r.get("priority") == "SHOULD-RUN"]
             st.markdown(f"**MUST-RUN:** {len(must)} | **SHOULD-RUN:** {len(should)}")
             for r in regression:
-                prio_icon = "🔴" if r.get("priority") == "MUST-RUN" else "🟡"
-                st.markdown(f"{prio_icon} `{r.get('test_case_id', '')}` — {r.get('test_case_name', '')}")
+                prio_tag = "[MUST-RUN]" if r.get("priority") == "MUST-RUN" else "[SHOULD-RUN]"
+                st.markdown(f"{prio_tag} `{r.get('test_case_id', '')}` — {r.get('test_case_name', '')}")
                 st.caption(f"Reason: {r.get('reason', '')}")
         else:
             st.info("No existing test cases in graph. Ingest test cases to see regression recommendations.")
 
-    with st.expander(f"✏️ SECTION 9: Test Cases to UPDATE ({len(result.get('test_cases_to_update', []))})", expanded=False):
+    with st.expander(f"SECTION 9: Test Cases to UPDATE ({len(result.get('test_cases_to_update', []))})", expanded=False):
         for u in result.get("test_cases_to_update", []):
-            st.markdown(f"📝 `{u.get('test_case_id', '')}` — {u.get('test_case_name', '')}")
+            st.markdown(f"`{u.get('test_case_id', '')}` — {u.get('test_case_name', '')}")
             st.caption(f"Update reason: {u.get('update_reason', '')}")
 
-    with st.expander(f"🕳️ SECTION 10: Missing Coverage ({len(result.get('missing_coverage', []))})", expanded=True):
+    with st.expander(f"SECTION 10: Missing Coverage ({len(result.get('missing_coverage', []))})", expanded=True):
         for gap in result.get("missing_coverage", []):
-            gap_icon = {"missing_test": "❌", "untested_flow": "🔀", "edge_case": "⚡", "boundary": "📐"}.get(gap.get("gap_type", ""), "⚠️")
-            st.markdown(f"{gap_icon} **{gap.get('area', '')}** — {gap.get('description', '')}")
-            st.caption(f"💡 {gap.get('recommendation', '')}")
+            gap_type = gap.get("gap_type", "").replace("_", " ").upper()
+            st.markdown(f"[{gap_type}] **{gap.get('area', '')}** — {gap.get('description', '')}")
+            st.caption(f"{gap.get('recommendation', '')}")
 
-    with st.expander(f"🔌 SECTION 11: API + Event Validation ({len(result.get('api_event_validation', []))})", expanded=False):
+    with st.expander(f"SECTION 11: API + Event Validation ({len(result.get('api_event_validation', []))})", expanded=False):
         for api in result.get("api_event_validation", []):
             st.markdown(f"**`{api.get('method', '')} {api.get('endpoint', '')}`**")
             for v in api.get("validations", []):
@@ -207,7 +215,7 @@ def _render_results(result: dict):
                 st.caption(f"Events published: {', '.join(api['event_triggers'])}")
             st.divider()
 
-    with st.expander("✅ SECTION 12: QA Sign-off Checklist", expanded=True):
+    with st.expander("SECTION 12: QA Sign-off Checklist", expanded=True):
         checklist = result.get("signoff_checklist", [])
         categories: dict = {}
         for item in checklist:
@@ -217,15 +225,15 @@ def _render_results(result: dict):
             st.markdown(f"**{cat}**")
             for item in items:
                 status = item.get("status", "PENDING")
-                icon = {"MUST_VERIFY": "🔴", "AUTOMATED": "🤖", "PENDING": "⬜"}.get(status, "⬜")
+                tag = {"MUST_VERIFY": "[MUST]", "AUTOMATED": "[AUTO]", "PENDING": "[PENDING]"}.get(status, "[PENDING]")
                 owner = item.get("owner", "QA")
-                st.markdown(f"  {icon} {item.get('item', '')} _(Owner: {owner})_")
+                st.markdown(f"  {tag} {item.get('item', '')} _(Owner: {owner})_")
 
     st.divider()
     col_exp1, col_exp2 = st.columns(2)
     with col_exp1:
         st.download_button(
-            "📥 Export Full Report (JSON)",
+            "Export Full Report (JSON)",
             data=json.dumps(result, indent=2, default=str),
             file_name=f"qa_report_{result.get('generated_at', 'report')[:10]}.json",
             mime="application/json",
@@ -239,7 +247,7 @@ def _render_results(result: dict):
         for r in result.get("risk_areas", []):
             md_lines.append(f"- **{r.get('priority')}** {r.get('feature', r.get('module', ''))} (score: {r.get('risk_score', 0):.2f})\n")
         st.download_button(
-            "📄 Export Report (Markdown)",
+            "Export Report (Markdown)",
             data="".join(md_lines),
             file_name="qa_report.md",
             mime="text/markdown",
@@ -248,7 +256,7 @@ def _render_results(result: dict):
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("🧠 QA Intelligence")
+    st.title("QA Intelligence")
     st.caption("Three-Brain QA Architecture")
     st.divider()
 
@@ -291,7 +299,7 @@ with st.sidebar:
 
 
 # ─── Main Tabs ────────────────────────────────────────────────────────────────
-tab_ingest, tab_analyze, tab_graph = st.tabs(["📥 Ingest", "🔬 Analyze & Generate", "🕸️ Knowledge Graph"])
+tab_ingest, tab_analyze, tab_graph = st.tabs(["Ingest", "Analyze & Generate", "Knowledge Graph"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -326,8 +334,8 @@ with tab_ingest:
     st.caption("Upload your BRD, SRS, User Stories, Bug Reports, API Contracts, DB Schemas — doc type is auto-detected from the filename.")
 
     uploaded_files = st.file_uploader(
-        "Drop files here or click to browse (PDF, DOCX, TXT, JSON, MD, YAML)",
-        type=["pdf", "docx", "txt", "json", "md", "yaml"],
+        "Drop files here or click to browse (PDF, DOCX, XLSX, TXT, JSON, MD, YAML)",
+        type=["pdf", "docx", "xlsx", "xls", "txt", "json", "md", "yaml"],
         accept_multiple_files=True,
     )
 
@@ -337,7 +345,7 @@ with tab_ingest:
         cols = st.columns(min(len(uploaded_files), 4))
         for i, f in enumerate(uploaded_files):
             detected = _infer_doc_type(f.name)
-            cols[i % 4].info(f"📄 `{f.name}`\n\n→ `{detected}`")
+            cols[i % 4].info(f"`{f.name}`\n\n→ `{detected}`")
 
         st.caption("Rename files to include keywords (brd, srs, bug, api, schema, story, event, test, rule) for accurate auto-detection.")
 
@@ -358,16 +366,16 @@ with tab_ingest:
                         )
                         if resp.status_code == 200:
                             r = resp.json()
-                            results.append({"file": f.name, "type": doc_type, "status": "✅",
+                            results.append({"file": f.name, "type": doc_type, "status": "OK",
                                             "chunks": r["chunks_stored"],
                                             "entities": r["entities_extracted"],
                                             "rels": r["relationships_created"]})
                         else:
-                            results.append({"file": f.name, "type": doc_type, "status": "❌",
+                            results.append({"file": f.name, "type": doc_type, "status": "FAIL",
                                             "chunks": 0, "entities": 0, "rels": 0,
                                             "error": resp.text[:120]})
                     except Exception as e:
-                        results.append({"file": f.name, "type": doc_type, "status": "❌",
+                        results.append({"file": f.name, "type": doc_type, "status": "FAIL",
                                         "chunks": 0, "entities": 0, "rels": 0, "error": str(e)})
                 progress.progress((i + 1) / total, f"Ingested {i + 1} / {total}: {f.name}")
 
@@ -379,10 +387,10 @@ with tab_ingest:
             c3.metric("Total Entities", sum(r["entities"] for r in results))
 
             for r in results:
-                if r["status"] == "✅":
-                    st.success(f"{r['status']} **{r['file']}** (`{r['type']}`) — {r['chunks']} chunks · {r['entities']} entities · {r['rels']} relationships")
+                if r["status"] == "OK":
+                    st.success(f"[OK] **{r['file']}** (`{r['type']}`) — {r['chunks']} chunks · {r['entities']} entities · {r['rels']} relationships")
                 else:
-                    st.error(f"{r['status']} **{r['file']}** — {r.get('error', 'unknown error')}")
+                    st.error(f"[FAIL] **{r['file']}** — {r.get('error', 'unknown error')}")
     else:
         st.info("No files selected yet. Upload one or more files above to populate the knowledge base.")
 
@@ -399,7 +407,7 @@ with tab_analyze:
             "User Story",
             height=140,
             placeholder="As a [role], I want to [goal], so that [benefit]...\n\nOr paste a detailed feature description.",
-            value="As a registered customer, I want to apply a discount coupon code at checkout, so that I can save money on my purchase. The coupon must be validated server-side, expiry checked, single-use enforced, and discount applied before tax calculation. Only one coupon per order is allowed."
+            value=""
         )
     with col_opts:
         module_name = st.text_input("Module (optional)", placeholder="e.g. Checkout")
@@ -409,7 +417,7 @@ with tab_analyze:
         include_api = st.checkbox("API Validation", value=True)
         risk_threshold = st.slider("Min Risk Score", 0.0, 1.0, 0.1, 0.05)
 
-    if st.button("🔬 Run QA Analysis", type="primary", use_container_width=True):
+    if st.button("Run QA Analysis", type="primary", use_container_width=True):
         if not user_story.strip():
             st.warning("Please enter a user story")
         else:
@@ -434,8 +442,10 @@ with tab_analyze:
                     if resp.status_code == 200:
                         result = resp.json()
                         st.session_state["qa_result"] = result
+                        complexity = result.get("complexity_level", "moderate").upper()
                         st.success(
-                            f"Analysis complete! Risk: **{result.get('overall_risk', '?')}** | "
+                            f"Analysis complete! Complexity: **{complexity}** | "
+                            f"Risk: **{result.get('overall_risk', '?')}** | "
                             f"Scenarios: **{result.get('total_scenarios', 0)}** | "
                             f"Warnings: **{len(result.get('heads_up_warnings', []))}**"
                         )
@@ -464,10 +474,9 @@ with tab_graph:
             stats = stats_resp.json()
             cols = st.columns(6)
             labels = ["module", "feature", "api", "bug", "testcase", "event"]
-            icons = ["🏗️", "⚙️", "🔌", "🐛", "🧪", "📨"]
-            for i, (label, icon) in enumerate(zip(labels, icons)):
+            for i, label in enumerate(labels):
                 count = stats.get(f"{label}_count", 0)
-                cols[i].metric(f"{icon} {label.title()}s", count)
+                cols[i].metric(f"{label.title()}s", count)
 
             st.metric("Total Nodes", stats.get("total_nodes", 0))
             st.metric("Total Relationships", stats.get("total_relationships", 0))

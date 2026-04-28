@@ -1,12 +1,16 @@
 from pydantic_settings import BaseSettings
 from pathlib import Path
 
+_ENV_FILE = Path(__file__).parent.parent / ".env"
+
 
 class Settings(BaseSettings):
-    # LLM
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "llama3"
-    OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
+    # DeepInfra
+    DEEPINFRA_API_KEY: str = ""
+    DEEPINFRA_BASE_URL: str = "https://api.deepinfra.com/v1/openai"
+    LLM_MODEL: str = "openai/gpt-oss-120b"
+    EMBED_MODEL: str = "BAAI/bge-large-en-v1.5"
+    ENTITY_MODEL: str = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 
     # Graph
     USE_NEO4J: bool = False
@@ -30,7 +34,7 @@ class Settings(BaseSettings):
     MAX_RETRIEVAL_DOCS: int = 10
 
     class Config:
-        env_file = ".env"
+        env_file = str(_ENV_FILE)
         env_file_encoding = "utf-8"
 
 

@@ -58,13 +58,14 @@ class EntityExtractor:
 
     def _get_llm(self):
         if self._llm is None:
-            from langchain_ollama import OllamaLLM
+            from langchain_openai import ChatOpenAI
             from config import settings
-            self._llm = OllamaLLM(
-                base_url=settings.OLLAMA_BASE_URL,
-                model=settings.OLLAMA_MODEL,
-                temperature=0.1,
-                format="json",
+            self._llm = ChatOpenAI(
+                openai_api_key=settings.DEEPINFRA_API_KEY,
+                openai_api_base=settings.DEEPINFRA_BASE_URL,
+                model=settings.ENTITY_MODEL,
+                temperature=0,
+                model_kwargs={"seed": 42},
             )
         return self._llm
 

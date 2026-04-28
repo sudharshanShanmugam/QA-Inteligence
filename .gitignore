@@ -1,0 +1,119 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+wheels/
+*.pyc
+*.pyz
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+coverage.xml
+*.xml
+nosetests.xml
+test-results/
+junit/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+.pyright/
+pyrightconfig.json
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+logs/
+*.out
+*.err
+uvicorn*.log
+gunicorn*.log
+
+# Runtime / generated data
+backend/graph_data/
+backend/backend/
+chroma_db/
+backend/chroma_db/
+*.pkl
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploaded / temp files
+uploads/
+tmp/
+temp/
+/tmp/
+
+# Neo4j (if run locally)
+neo4j/data/
+neo4j/logs/
+neo4j/import/
+neo4j/plugins/
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Profiling
+*.prof
+*.lprof
+
+# Secrets & credentials (keep .env tracked)
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+!.env

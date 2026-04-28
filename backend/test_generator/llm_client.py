@@ -20,21 +20,23 @@ class LLMClient:
         self._llm = None
         self._streaming_llm = None
 
-    def _get_llm(self, temperature: float = 0.2):
-        from langchain_ollama import OllamaLLM
-        return OllamaLLM(
-            base_url=settings.OLLAMA_BASE_URL,
-            model=settings.OLLAMA_MODEL,
+    def _get_llm(self, temperature: float = 0):
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            openai_api_key=settings.DEEPINFRA_API_KEY,
+            openai_api_base=settings.DEEPINFRA_BASE_URL,
+            model=settings.LLM_MODEL,
             temperature=temperature,
+            model_kwargs={"seed": 42},
         )
 
-    def generate(self, prompt: str, temperature: float = 0.2, max_retries: int = 2) -> str:
+    def generate(self, prompt: str, temperature: float = 0, max_retries: int = 2) -> str:
         """Generate text from a prompt. Returns raw string."""
         llm = self._get_llm(temperature)
         for attempt in range(max_retries + 1):
             try:
                 result = llm.invoke(prompt)
-                return result
+                return result.content if hasattr(result, "content") else str(result)
             except Exception as e:
                 log.warning("llm_generation_failed", attempt=attempt, error=str(e))
                 if attempt == max_retries:
@@ -45,12 +47,12 @@ class LLMClient:
         raw = self.generate(prompt + "\n\nRespond with valid JSON only, no markdown fences.")
         return self._parse_json(raw, fallback)
 
-    def stream(self, prompt: str, temperature: float = 0.3) -> Generator[str, None, None]:
+    def stream(self, prompt: str, temperature: float = 0) -> Generator[str, None, None]:
         """Stream tokens from the LLM."""
         llm = self._get_llm(temperature)
         try:
             for chunk in llm.stream(prompt):
-                yield chunk
+                yield chunk.content if hasattr(chunk, "content") else str(chunk)
         except Exception as e:
             log.warning("llm_stream_failed", error=str(e))
             yield f"[Stream error: {str(e)}]"
@@ -73,7 +75,7 @@ class LLMClient:
             events=", ".join(events[:5]) or "None identified",
             business_rules=", ".join(str(r) for r in business_rules[:5]) or "None identified",
         )
-        result = self.generate(prompt, temperature=0.3)
+        result = self.generate(prompt, temperature=0)
         return result or "Feature understanding not available – insufficient context in knowledge base."
 
     def generate_gherkin(
@@ -82,12 +84,13 @@ class LLMClient:
         scenarios: List[Dict[str, Any]],
         risk_context: str,
         warnings: List[Dict[str, Any]],
+        gherkin_limit: int = 12,
     ) -> List[Dict[str, Any]]:
         from test_generator.prompt_templates import GHERKIN_GENERATION_PROMPT
 
         scenarios_text = "\n".join(
             f"{i+1}. [{s.get('type','').upper()}] {s.get('title','')}: {s.get('description','')}"
-            for i, s in enumerate(scenarios[:15])
+            for i, s in enumerate(scenarios[:gherkin_limit])
         )
         warnings_text = "\n".join(
             f"- {w.get('warning', '')} → {w.get('recommendation', '')}"
@@ -99,9 +102,10 @@ class LLMClient:
             scenarios=scenarios_text,
             risk_context=risk_context[:400],
             warnings=warnings_text,
+            gherkin_limit=gherkin_limit,
         )
-        raw = self.generate(prompt, temperature=0.2)
-        return self._parse_gherkin(raw, scenarios[:10])
+        raw = self.generate(prompt, temperature=0)
+        return self._parse_gherkin(raw, scenarios[:gherkin_limit])
 
     def generate_edge_cases(
         self,
@@ -110,6 +114,7 @@ class LLMClient:
         bva_results: List[Dict],
         ep_results: List[Dict],
         state_machine: Optional[Dict],
+        edge_count: int = 8,
     ) -> List[Dict[str, Any]]:
         from test_generator.prompt_templates import EDGE_CASE_PROMPT
 
@@ -119,6 +124,7 @@ class LLMClient:
             bva_results=json.dumps(bva_results[:5], default=str),
             ep_results=json.dumps(ep_results[:5], default=str),
             state_machine=json.dumps(state_machine or {}, default=str),
+            edge_count=edge_count,
         )
         result = self.generate_json(prompt, fallback=[])
         return result if isinstance(result, list) else []

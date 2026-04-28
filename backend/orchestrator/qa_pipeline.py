@@ -49,6 +49,63 @@ class QAPipeline:
     # MAIN ENTRY POINT
     # ════════════════════════════════════════════════════════════════════════
 
+    # ════════════════════════════════════════════════════════════════════════
+    # COMPLEXITY ASSESSMENT
+    # ════════════════════════════════════════════════════════════════════════
+
+    def _assess_complexity(
+        self,
+        feature_understanding: str,
+        user_story: str,
+        modules: List[Dict],
+        apis: List[Dict],
+        events: List[Dict],
+        states: List[Dict],
+        risk_priority: str,
+    ) -> tuple:
+        """Score feature complexity → returns (level, limits).
+
+        level: 'simple' | 'moderate' | 'complex'
+        limits: per-technique scenario caps.
+        """
+        score = 0
+
+        word_count = len(user_story.split())
+        if word_count > 100:
+            score += 2
+        elif word_count > 50:
+            score += 1
+
+        score += min(len(apis), 3)
+        score += min(len(events), 2)
+        score += min(len(states), 2)
+        score += min(len(modules), 3)
+
+        risk_scores = {"P1": 4, "P2": 3, "P3": 2, "P4": 0,
+                       "critical": 4, "high": 3, "medium": 2, "low": 0}
+        score += risk_scores.get(risk_priority, 1)
+
+        if len(feature_understanding) > 500:
+            score += 2
+        elif len(feature_understanding) > 200:
+            score += 1
+
+        if score <= 5:
+            level = "simple"
+            limits = {"bva": 4, "ep": 3, "pairwise": 2, "dt": 2,
+                      "state": 1, "flow": 2, "edge_count": 4, "gherkin": 5}
+        elif score <= 10:
+            level = "moderate"
+            limits = {"bva": 10, "ep": 8, "pairwise": 5, "dt": 5,
+                      "state": 3, "flow": 3, "edge_count": 8, "gherkin": 12}
+        else:
+            level = "complex"
+            limits = {"bva": 15, "ep": 12, "pairwise": 8, "dt": 8,
+                      "state": 5, "flow": 5, "edge_count": 15, "gherkin": 20}
+
+        log.info("complexity_assessed", level=level, score=score)
+        return level, limits
+
     def run(self, user_story: str, module_name: str = "", priority: str = "medium") -> Dict[str, Any]:
         log.info("pipeline_start", story_preview=user_story[:80])
 
@@ -144,11 +201,6 @@ class QAPipeline:
         rag_result = retriever.retrieve(user_story + " " + feature_name)
         rag_context_str = retriever.build_context_string(rag_result)
 
-        # Assemble all analytical scenarios before passing to LLM
-        analytical_scenarios = self._build_scenarios(
-            bva_results, ep_results, pairwise_results, dt_result, state_tests, flow_steps
-        )
-
         # LLM: Feature Understanding
         feature_understanding = llm_client.generate_feature_understanding(
             user_story=user_story,
@@ -159,22 +211,41 @@ class QAPipeline:
             business_rules=[],
         )
 
-        # LLM: Gherkin test cases
+        # Agentic complexity assessment — scales all downstream generation
+        complexity_level, complexity_limits = self._assess_complexity(
+            feature_understanding=feature_understanding,
+            user_story=user_story,
+            modules=modules + impacted_modules,
+            apis=apis,
+            events=events,
+            states=states,
+            risk_priority=feature_risk["priority"],
+        )
+
+        # Rebuild analytical scenarios using complexity-scaled limits
+        analytical_scenarios = self._build_scenarios(
+            bva_results, ep_results, pairwise_results, dt_result, state_tests, flow_steps,
+            limits=complexity_limits,
+        )
+
+        # LLM: Gherkin test cases — count scales with complexity
         risk_context = f"Risk Level: {feature_risk['priority']}. Reasons: {'; '.join(feature_risk['reasons'])}"
         gherkin_tests = llm_client.generate_gherkin(
             user_story=user_story,
-            scenarios=analytical_scenarios[:12],
+            scenarios=analytical_scenarios[:complexity_limits["gherkin"]],
             risk_context=risk_context,
             warnings=warnings[:5],
+            gherkin_limit=complexity_limits["gherkin"],
         )
 
-        # LLM: Additional edge cases
+        # LLM: Additional edge cases — count scales with complexity
         edge_cases = llm_client.generate_edge_cases(
             feature_name=feature_name,
             bug_context=rag_result.get("context_by_type", {}).get("bug_report", [""])[0][:800] if rag_result.get("context_by_type", {}).get("bug_report") else "",
             bva_results=bva_results[:5],
             ep_results=ep_results[:5],
             state_machine=state_machine_spec,
+            edge_count=complexity_limits["edge_count"],
         )
 
         # LLM: API validations
@@ -228,6 +299,7 @@ class QAPipeline:
             "feature_name": feature_name,
             "total_scenarios": total_scenarios,
             "overall_risk": overall_risk,
+            "complexity_level": complexity_level,
             "generated_at": datetime.utcnow().isoformat() + "Z",
             "graph_stats": gq.get_graph_stats(),
         }
@@ -335,12 +407,15 @@ class QAPipeline:
         dt_result: Dict,
         state_tests: Dict,
         flow_steps: List[Dict],
+        limits: Optional[Dict] = None,
     ) -> List[Dict[str, Any]]:
         """Combine all analytical scenarios into a unified list."""
+        if limits is None:
+            limits = {"bva": 10, "ep": 8, "pairwise": 5, "dt": 5, "state": 3, "flow": 3}
         scenarios: List[Dict[str, Any]] = []
         counter = 1
 
-        for bva in bva_results[:10]:
+        for bva in bva_results[:limits["bva"]]:
             scenarios.append({
                 "id": f"TC-BVA-{counter:03d}",
                 "type": "boundary_value",
@@ -359,7 +434,7 @@ class QAPipeline:
             })
             counter += 1
 
-        for ep in ep_results[:8]:
+        for ep in ep_results[:limits["ep"]]:
             scenarios.append({
                 "id": f"TC-EP-{counter:03d}",
                 "type": "equivalence_partition",
@@ -378,7 +453,7 @@ class QAPipeline:
             })
             counter += 1
 
-        for pw in pairwise_results[:5]:
+        for pw in pairwise_results[:limits["pairwise"]]:
             params_str = ", ".join(f"{k}={v}" for k, v in pw.get("parameters", {}).items())
             scenarios.append({
                 "id": pw.get("id", f"TC-PW-{counter:03d}"),
@@ -394,7 +469,7 @@ class QAPipeline:
             })
             counter += 1
 
-        for tc in dt_result.get("test_cases", [])[:5]:
+        for tc in dt_result.get("test_cases", [])[:limits["dt"]]:
             scenarios.append({
                 "id": tc.get("id", f"TC-DT-{counter:03d}"),
                 "type": "decision_table",
@@ -410,7 +485,7 @@ class QAPipeline:
             counter += 1
 
         for st_list in state_tests.values():
-            for tc in st_list[:3]:
+            for tc in st_list[:limits["state"]]:
                 scenarios.append({
                     "id": tc.get("id", f"TC-ST-{counter:03d}"),
                     "type": "state_transition",
@@ -426,7 +501,7 @@ class QAPipeline:
                 counter += 1
 
         # Add E2E flow tests
-        for step in flow_steps[:3]:
+        for step in flow_steps[:limits["flow"]]:
             scenarios.append({
                 "id": f"TC-FLOW-{counter:03d}",
                 "type": "event_flow",

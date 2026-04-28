@@ -12,7 +12,7 @@ log = structlog.get_logger()
 class DocumentLoader:
     """Loads and normalises documents from various formats into a unified structure."""
 
-    SUPPORTED_EXTENSIONS = {".txt", ".md", ".json", ".pdf", ".docx", ".sql", ".yaml", ".yml"}
+    SUPPORTED_EXTENSIONS = {".txt", ".md", ".json", ".pdf", ".docx", ".sql", ".yaml", ".yml", ".xlsx", ".xls"}
 
     def load_text(self, content: str, doc_type: str, source_id: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
         return {
@@ -54,6 +54,9 @@ class DocumentLoader:
         elif ext == ".docx":
             return self._load_docx(path, doc_type)
 
+        elif ext in (".xlsx", ".xls"):
+            return self._load_xlsx(path, doc_type)
+
         else:
             with open(path, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -81,6 +84,24 @@ class DocumentLoader:
             content = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
         except ImportError:
             content = f"[DOCX parsing unavailable – install python-docx] File: {path.name}"
+        return self.load_text(content, doc_type, path.stem)
+
+    def _load_xlsx(self, path: Path, doc_type: str) -> Dict[str, Any]:
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            parts = []
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                parts.append(f"=== Sheet: {sheet_name} ===")
+                for row in ws.iter_rows(values_only=True):
+                    cells = [str(c) if c is not None else "" for c in row]
+                    line = " | ".join(cells).strip(" |")
+                    if line:
+                        parts.append(line)
+            content = "\n".join(parts)
+        except ImportError:
+            content = f"[XLSX parsing unavailable – install openpyxl] File: {path.name}"
         return self.load_text(content, doc_type, path.stem)
 
     def _json_to_text(self, data: Dict[str, Any], doc_type: str) -> str:
