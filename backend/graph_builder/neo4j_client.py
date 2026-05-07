@@ -8,11 +8,7 @@ of which backend is in use.
 
 from __future__ import annotations
 
-import json
-import pickle
-import uuid
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import networkx as nx
@@ -61,17 +57,11 @@ class GraphAdapter(ABC):
 
 
 class NetworkXAdapter(GraphAdapter):
-    """In-process graph – persisted as pickle. No server required."""
+    """In-process in-memory graph. No disk persistence."""
 
     def __init__(self):
-        self._path = Path(settings.GRAPH_PERSIST_PATH)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        if self._path.exists():
-            with open(self._path, "rb") as f:
-                self._g: nx.MultiDiGraph = pickle.load(f)
-            log.info("graph_loaded_from_disk", nodes=self._g.number_of_nodes())
-        else:
-            self._g = nx.MultiDiGraph()
+        self._g: nx.MultiDiGraph = nx.MultiDiGraph()
+        log.info("graph_initialised_in_memory")
 
     # ── write ────────────────────────────────────────────────────────────────
 
@@ -81,18 +71,12 @@ class NetworkXAdapter(GraphAdapter):
             self._g.nodes[node_id].update(props)
         else:
             self._g.add_node(node_id, **props)
-        self._persist()
         return node_id
 
     def upsert_relationship(self, from_id: str, to_id: str, rel_type: str,
                              properties: Dict[str, Any] | None = None) -> None:
         props = properties or {}
-        # Avoid duplicate edges of same type between same nodes
-        for _, _, data in self._g.edges(from_id, data=True):
-            if data.get("rel_type") == rel_type and _ == from_id:
-                pass  # allow duplicates only once
         self._g.add_edge(from_id, to_id, rel_type=rel_type, **props)
-        self._persist()
 
     # ── read ─────────────────────────────────────────────────────────────────
 
@@ -146,11 +130,7 @@ class NetworkXAdapter(GraphAdapter):
             return []
 
     def close(self) -> None:
-        self._persist()
-
-    def _persist(self):
-        with open(self._path, "wb") as f:
-            pickle.dump(self._g, f)
+        pass
 
 
 # ─── Neo4j Adapter ───────────────────────────────────────────────────────────

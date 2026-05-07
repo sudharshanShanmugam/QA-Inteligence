@@ -20,16 +20,15 @@ import structlog
 
 from graph_builder.neo4j_client import get_graph
 from graph_builder.graph_queries import GraphQueryEngine
-from analytics_engine.risk_engine import risk_engine
 from analytics_engine.bva_engine import bva_engine
 from analytics_engine.ep_engine import ep_engine
 from analytics_engine.state_transition import state_engine
 from analytics_engine.pairwise_engine import pairwise_engine
 from analytics_engine.decision_table import decision_table_builder
 from analytics_engine.bug_intelligence import bug_intelligence
-from analytics_engine.regression_analyzer import regression_analyzer
 from analytics_engine.event_flow_tracer import event_flow_tracer
 from analytics_engine.coverage_analyzer import coverage_analyzer
+from analytics_engine.regression_analyzer import regression_analyzer
 from rag_engine.retriever import retriever
 from test_generator.llm_client import llm_client
 
@@ -106,12 +105,17 @@ class QAPipeline:
         log.info("complexity_assessed", level=level, score=score)
         return level, limits
 
-    def run(self, user_story: str, module_name: str = "", priority: str = "medium") -> Dict[str, Any]:
+    def run(self, user_story: str) -> Dict[str, Any]:
         log.info("pipeline_start", story_preview=user_story[:80])
 
         gq = self._get_graph_engine()
         feature_name = self._extract_feature_name(user_story)
-        module_name = module_name or self._infer_module(user_story)
+
+        # LLM auto-detects module, priority and risk from the story
+        story_meta = llm_client.infer_story_metadata(user_story)
+        module_name = story_meta["module"]
+        priority = story_meta["priority"]
+        log.info("story_metadata", module=module_name, priority=priority, risk=story_meta["risk_level"])
 
         # ──────────────────────────────────────────────────────────────────
         # BRAIN 1: Knowledge Graph
@@ -129,6 +133,11 @@ class QAPipeline:
         states = graph_data.get("states", [])
         journeys = graph_data.get("journeys", [])
 
+        # If graph has no APIs, infer from user story via LLM
+        if not apis:
+            apis = llm_client.infer_apis_from_story(user_story)
+            log.info("graph_empty_apis_inferred_from_story", count=len(apis))
+
         primary_module = modules[0] if modules else {"id": module_name, "name": module_name, "criticality": 3}
 
         # ──────────────────────────────────────────────────────────────────
@@ -136,16 +145,21 @@ class QAPipeline:
         # ──────────────────────────────────────────────────────────────────
         log.info("brain2_analytics_start")
 
-        # 2a. Risk scoring
-        module_risk = risk_engine.score_module(primary_module, graph_bugs, impacted_modules)
-        feature_risk = risk_engine.score_feature(
-            {"name": feature_name, "priority": priority},
-            graph_bugs,
-            module_risk["risk_score"],
-            has_state_machine=bool(states),
-            has_external_events=bool(events),
+        # 2a. LLM-based risk reasoning
+        all_risk_areas = llm_client.generate_risk_assessment(
+            user_story=user_story,
+            feature_name=feature_name,
+            module_name=module_name,
+            bugs=all_bugs,
+            modules=modules + impacted_modules,
+            apis=apis,
+            events=events,
+            states=states,
+            priority=priority,
         )
-        all_risk_areas = risk_engine.rank_risk_areas([module_risk, feature_risk])
+        feature_risk = all_risk_areas[0] if all_risk_areas else {
+            "priority": "P2", "risk_score": 0.5, "reasons": []
+        }
 
         # 2b. Field specs from story (heuristic extraction)
         field_specs = self._extract_field_specs(user_story)
@@ -160,8 +174,18 @@ class QAPipeline:
         dt_conditions, dt_actions = decision_table_builder.infer_conditions_from_story(user_story)
         dt_result = decision_table_builder.build(dt_conditions, dt_actions)
 
-        # 2e. State transition
+        # 2e. State transition — LLM first for domain-accurate states, heuristic as last resort
+        _generic_states = {"active", "inactive", "pending", "processing", "completed", "failed",
+                           "cancelled", "rejected", "approved", "submitted", "draft", "published",
+                           "archived", "locked", "open", "closed", "resolved", "in_progress", "paused"}
         state_machine_spec = state_engine.infer_from_description(user_story)
+        # If heuristic only found generic states (no domain-specific states), prefer LLM
+        heuristic_states = set(state_machine_spec.get("states", [])) if state_machine_spec else set()
+        if not state_machine_spec or heuristic_states.issubset(_generic_states):
+            llm_spec = llm_client.infer_state_machine_from_story(user_story)
+            if llm_spec:
+                state_machine_spec = llm_spec
+                log.info("state_machine_from_llm", entity=llm_spec.get("entity"), states=len(llm_spec.get("states", [])))
         state_tests: Dict = {}
         if state_machine_spec:
             machine = state_engine.build_machine(state_machine_spec)
@@ -192,6 +216,11 @@ class QAPipeline:
             feature_name, primary_module.get("name", ""),
             impacted_modules, test_cases_in_graph,
         )
+        # If no existing test cases, synthesise regression suite from analytical scenarios
+        if not test_cases_in_graph and not regression.get("must_run"):
+            regression = self._synthesise_regression_from_scenarios(
+                feature_name, primary_module.get("name", module_name), all_bugs
+            )
 
         # ──────────────────────────────────────────────────────────────────
         # BRAIN 3: RAG + LLM Generation
@@ -228,7 +257,7 @@ class QAPipeline:
             limits=complexity_limits,
         )
 
-        # LLM: Gherkin test cases — count scales with complexity
+        # LLM: Gherkin test cases
         risk_context = f"Risk Level: {feature_risk['priority']}. Reasons: {'; '.join(feature_risk['reasons'])}"
         gherkin_tests = llm_client.generate_gherkin(
             user_story=user_story,
@@ -251,52 +280,29 @@ class QAPipeline:
         # LLM: API validations
         api_validations = llm_client.generate_api_validations(apis[:6], events[:4])
 
-        # LLM: Sign-off checklist
-        all_module_names = [m.get("name", "") for m in modules + impacted_modules]
-        signoff_checklist = llm_client.generate_signoff_checklist(
-            feature_name=feature_name,
-            risk_level=feature_risk["priority"],
-            modules=all_module_names,
-            total_tests=len(analytical_scenarios) + len(gherkin_tests),
-            regression_count=len(regression.get("must_run", [])),
-            gaps=coverage_gaps[:5],
-            warnings_count=len(warnings),
-        )
-
         # ──────────────────────────────────────────────────────────────────
-        # Assemble Final Output (12 sections)
+        # Assemble Final Output
         # ──────────────────────────────────────────────────────────────────
         overall_risk = feature_risk["priority"]
         total_scenarios = len(analytical_scenarios) + len(gherkin_tests) + len(edge_cases)
 
         result = {
-            # Section 1
             "feature_understanding": feature_understanding,
-            # Section 2
             "impacted_modules": self._format_modules(modules, impacted_modules),
-            # Section 3
             "event_flow": flow_steps,
-            # Section 4
             "risk_areas": all_risk_areas,
-            # Section 5
             "heads_up_warnings": warnings,
-            # Section 6
             "test_scenarios": self._format_test_scenarios(analytical_scenarios, edge_cases),
-            # Section 7
             "gherkin_test_cases": gherkin_tests,
-            # Section 8
             "regression_suite": regression.get("must_run", []),
-            # Section 9
             "test_cases_to_update": regression.get("to_update", []),
-            # Section 10
             "missing_coverage": coverage_gaps,
-            # Section 11
             "api_event_validation": api_validations,
-            # Section 12
-            "signoff_checklist": signoff_checklist,
             # Metadata
             "user_story": user_story,
             "feature_name": feature_name,
+            "detected_module": module_name,
+            "detected_priority": priority,
             "total_scenarios": total_scenarios,
             "overall_risk": overall_risk,
             "complexity_level": complexity_level,
@@ -356,8 +362,20 @@ class QAPipeline:
         fields = []
         story_lower = story.lower()
 
-        # Amount/price fields
-        if any(w in story_lower for w in ["amount", "price", "cost", "fee", "total"]):
+        # Coupon/promo/voucher code field
+        if any(w in story_lower for w in ["coupon", "promo", "voucher", "coupon code", "promo code"]):
+            fields.append({"name": "coupon_code", "type": "string", "min": 3, "max": 20, "required": True})
+
+        # Order/cart total field
+        if any(w in story_lower for w in ["order total", "cart total", "total amount", "order amount"]):
+            fields.append({"name": "order_total", "type": "float", "min": 0.01, "max": 99999.99, "required": True})
+
+        # Retry count
+        if any(w in story_lower for w in ["retry", "retries", "attempt", "re-try"]):
+            fields.append({"name": "retry_count", "type": "integer", "min": 0, "max": 5, "required": False})
+
+        # Amount/price fields (generic)
+        if any(w in story_lower for w in ["amount", "price", "cost", "fee"]) and "order total" not in story_lower:
             fields.append({"name": "amount", "type": "float", "min": 0.01, "max": 999999.99, "required": True})
 
         # Quantity fields
@@ -380,8 +398,10 @@ class QAPipeline:
         if "phone" in story_lower or "mobile" in story_lower:
             fields.append({"name": "phone", "type": "phone", "required": False})
 
-        # Date fields
-        if any(w in story_lower for w in ["date", "deadline", "expiry", "expiration", "dob"]):
+        # Expiry/date fields
+        if any(w in story_lower for w in ["expired", "expiry", "expiration", "deadline", "dob"]):
+            fields.append({"name": "expiry_date", "type": "date", "required": True})
+        elif any(w in story_lower for w in ["date"]):
             fields.append({"name": "date", "type": "date", "required": True})
 
         # Status fields
@@ -392,6 +412,14 @@ class QAPipeline:
         # Percentage/discount
         if any(w in story_lower for w in ["discount", "percentage", "percent", "%"]):
             fields.append({"name": "discount_percentage", "type": "float", "min": 0.0, "max": 100.0, "required": False})
+
+        # OTP/PIN
+        if any(w in story_lower for w in ["otp", "pin", "verification code"]):
+            fields.append({"name": "otp", "type": "integer", "min": 100000, "max": 999999, "required": True})
+
+        # Password fields
+        if any(w in story_lower for w in ["password", "passphrase"]):
+            fields.append({"name": "password", "type": "string", "min": 8, "max": 128, "required": True})
 
         # Default if nothing found
         if not fields:
@@ -559,6 +587,50 @@ class QAPipeline:
                     "traceability": f"Feature → Edge case → {ec.get('risk_reason', 'historical pattern')}",
                 })
         return scenarios
+
+    def _synthesise_regression_from_scenarios(
+        self, feature_name: str, module_name: str, bugs: List[Dict]
+    ) -> Dict[str, Any]:
+        """Generate a meaningful regression suite even when the KB has no test cases.
+        Based on past bugs and known risk areas for the feature."""
+        must_run = []
+        counter = 1
+
+        # Bug-based regression tests
+        for bug in bugs[:10]:
+            sev = bug.get("severity", "medium").lower()
+            priority = "MUST-RUN" if sev in ("critical", "high", "blocker", "p1") else "SHOULD-RUN"
+            must_run.append({
+                "test_case_id": f"REG-BUG-{counter:03d}",
+                "test_case_name": f"Regression: {bug.get('title', bug.get('name', 'Bug regression'))}",
+                "module": bug.get("module", bug.get("module_id", module_name)),
+                "reason": f"Past bug [{bug.get('id', '')}] severity={sev.upper()}. Root cause: {bug.get('root_cause', bug.get('description', ''))[:100]}",
+                "priority": priority,
+                "needs_update": False,
+                "update_reason": None,
+            })
+            counter += 1
+
+        # Standard regression tests for the feature
+        standard = [
+            (f"REG-{counter:03d}", f"Happy path: {feature_name}", "Core functionality must work end-to-end", "MUST-RUN"),
+            (f"REG-{counter+1:03d}", f"Negative: invalid input rejected for {feature_name}", "All invalid inputs return correct error codes", "MUST-RUN"),
+            (f"REG-{counter+2:03d}", f"Auth: unauthorised access blocked for {module_name}", "Unauthenticated/unauthorised requests return 401/403", "MUST-RUN"),
+            (f"REG-{counter+3:03d}", f"Concurrent requests: {feature_name} under parallel load", "No race conditions or data corruption under concurrency", "SHOULD-RUN"),
+            (f"REG-{counter+4:03d}", f"Idempotency: duplicate {feature_name} request handled", "Duplicate requests do not cause duplicate side-effects", "SHOULD-RUN"),
+        ]
+        for tc_id, name, reason, priority in standard:
+            must_run.append({
+                "test_case_id": tc_id,
+                "test_case_name": name,
+                "module": module_name,
+                "reason": reason,
+                "priority": priority,
+                "needs_update": False,
+                "update_reason": None,
+            })
+
+        return {"must_run": must_run, "should_run": [], "to_update": []}
 
     def _find_nodes(self, label: str) -> List[Dict]:
         try:

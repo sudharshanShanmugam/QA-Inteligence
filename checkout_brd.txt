@@ -1,0 +1,31 @@
+
+Module: Checkout
+Priority: Critical
+Owner: Product Team
+
+BR-001: Cart Management
+- User must be able to add, update, remove items from cart
+- Cart must persist for 24 hours for logged-in users
+- Guest cart must merge with user cart on login
+
+BR-002: Coupon System
+- Only one coupon allowed per order
+- Coupon must be validated at time of checkout initiation (not at application)
+- Expired coupons must be rejected with user-friendly message
+- Coupon discount must not reduce order below minimum order value of $10
+
+BR-003: Payment Processing
+- System must support: Credit Card, Debit Card, PayPal, Wallet
+- Payment timeout must not exceed 30 seconds
+- On failure, order must transition back to CHECKOUT_PENDING (retry allowed)
+- Double-charge prevention: idempotency key required on every payment call
+
+BR-004: Order Confirmation
+- Inventory must be reserved at CHECKOUT_PENDING (not at ORDER_PLACED)
+- Confirmation email must be sent within 60 seconds of ORDER_CONFIRMED
+- Order number must be generated deterministically (not UUID)
+
+BR-005: Cancellation Policy
+- Free cancellation within 30 minutes of ORDER_CONFIRMED
+- After 30 minutes: cancellation fee applies
+- If item is already shipped: cancellation not allowed, return flow triggered

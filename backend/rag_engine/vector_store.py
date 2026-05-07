@@ -20,11 +20,8 @@ class VectorStore:
         if self._collection is not None:
             return
         import chromadb
-        from chromadb.config import Settings as ChromaSettings
 
-        self._client = chromadb.PersistentClient(
-            path=settings.CHROMA_PERSIST_DIR,
-        )
+        self._client = chromadb.EphemeralClient()
         self._collection = self._client.get_or_create_collection(
             name=settings.CHROMA_COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},

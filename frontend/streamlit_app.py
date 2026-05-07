@@ -1,19 +1,29 @@
 """
-QA Intelligence System – Streamlit Frontend
-
-Three-panel layout:
-  Left  → Ingest documents
-  Center → Analysis input + results
-  Right  → Graph stats + knowledge base status
+QA Intelligence System – Streamlit Frontend (standalone, no API server needed)
 """
 
 import json
-import time
-import requests
+import os
+import sys
+import tempfile
+import threading
+import concurrent.futures
 import streamlit as st
 from pathlib import Path
 
-API_BASE = "http://localhost:8000"
+# Make backend modules importable directly
+sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
+
+from config import settings
+from ingestion.document_loader import document_loader
+from ingestion.chunker import chunker
+from rag_engine.vector_store import vector_store
+from graph_builder.entity_extractor import entity_extractor
+from graph_builder.relationship_builder import relationship_builder
+from graph_builder.neo4j_client import get_graph
+from graph_builder.graph_queries import GraphQueryEngine
+from orchestrator.qa_pipeline import qa_pipeline
+from test_generator.llm_client import llm_client
 
 st.set_page_config(
     page_title="QA Intelligence System",
@@ -37,56 +47,115 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ─── Helper functions (must be defined before use in Streamlit) ──────────────
+# ─── Core ingestion helpers ───────────────────────────────────────────────────
 
-def _load_sample_data(sample_dir: Path):
-    """Ingest all sample data files into the knowledge base."""
-    files = {
-        "brd_sample.json": "brd",
-        "api_contract_sample.json": "api_contract",
-        "db_schema_sample.json": "db_schema",
-        "user_story_sample.json": "user_story",
+# Lock ensures concurrent threads never write to the graph simultaneously
+_graph_lock = threading.Lock()
+
+
+def _build_graph(document: dict) -> tuple[int, int]:
+    """Extract entities and build knowledge graph. Returns (entities, relationships)."""
+    try:
+        extraction = entity_extractor.extract(document)
+        with _graph_lock:
+            result = relationship_builder.ingest(extraction, document["source_id"])
+        return result["entities"], result["relationships"]
+    except Exception:
+        return 0, 0
+
+
+def _build_graph_timed(document: dict, timeout: int = 20) -> tuple[int, int, bool]:
+    """Run graph build with a hard timeout. Returns (entities, rels, timed_out)."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_build_graph, document)
+        try:
+            entities, rels = future.result(timeout=timeout)
+            return entities, rels, False
+        except concurrent.futures.TimeoutError:
+            return 0, 0, True
+        except Exception:
+            return 0, 0, False
+
+
+def _ingest_document(document: dict) -> dict:
+    """Chunk, embed, and build graph for a document. Returns summary counts."""
+    chunks = chunker.chunk(document)
+    chunks_stored = vector_store.add_chunks(chunks)
+    entities, rels = _build_graph(document)
+    return {"chunks_stored": chunks_stored, "entities_extracted": entities, "relationships_created": rels}
+
+
+def _process_file_parallel(f_bytes: bytes, filename: str, doc_type: str) -> dict:
+    """Full ingestion pipeline for one file — safe to run in a thread.
+    Never calls st.* — returns a result dict that the main thread renders."""
+    result = {
+        "file": filename, "type": doc_type, "status": "PENDING",
+        "chunks": 0, "entities": 0, "rels": 0, "steps": [],
     }
-    progress = st.progress(0)
-    results = []
+    try:
+        suffix = "." + filename.split(".")[-1] if "." in filename else ".txt"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(f_bytes)
+            tmp_path = tmp.name
 
-    for i, (fname, doc_type) in enumerate(files.items()):
-        fpath = sample_dir / fname
-        if fpath.exists():
-            with open(fpath) as f:
-                data = json.load(f)
-            try:
-                resp = requests.post(
-                    f"{API_BASE}/ingest/json",
-                    json={"data": data, "doc_type": doc_type, "source_id": fname.replace(".json", "")},
-                    timeout=60,
-                )
-                if resp.status_code == 200:
-                    results.append(f"[OK] {fname}")
-                else:
-                    results.append(f"[FAIL] {fname}: {resp.text[:80]}")
-            except Exception as e:
-                results.append(f"[FAIL] {fname}: {str(e)}")
-        else:
-            results.append(f"[WARN] {fname} not found")
-        progress.progress((i + 1) / len(files))
+        source_id = filename.rsplit(".", 1)[0]
+        document = document_loader.load_file(tmp_path, doc_type)
+        document["source_id"] = source_id
+        os.unlink(tmp_path)
+        result["steps"].append("File read")
 
-    bug_file = sample_dir / "bug_history_sample.json"
-    if bug_file.exists():
-        with open(bug_file) as f:
-            bugs = json.load(f)
-        for bug in bugs:
-            try:
-                requests.post(
-                    f"{API_BASE}/ingest/json",
-                    json={"data": bug, "doc_type": "bug_report", "source_id": bug.get("id", "bug")},
-                    timeout=30,
-                )
-            except Exception:
-                pass
-        results.append(f"[OK] bug_history_sample.json ({len(bugs)} bugs)")
+        # Relevance check
+        relevance = llm_client.check_document_relevance(
+            content=document.get("content", ""), filename=filename, doc_type=doc_type,
+        )
+        if not relevance["is_relevant"]:
+            result["status"] = "REJECTED"
+            result["reason"] = relevance["reason"]
+            result["detected_type"] = relevance.get("detected_type", "unknown")
+            return result
 
-    st.success("\n".join(results))
+        result["detected_type"] = relevance.get("detected_type", doc_type)
+        result["steps"].append(f"Relevant ({result['detected_type']})")
+
+        # Chunk
+        chunks = chunker.chunk(document)
+        result["steps"].append(f"Chunked → {len(chunks)} pieces")
+
+        # Embed + store (ChromaDB handles concurrent adds safely)
+        chunks_stored = vector_store.add_chunks(chunks)
+        result["chunks"] = chunks_stored
+        result["steps"].append(f"Stored {chunks_stored} chunks")
+
+        # Entity extraction with 20s cap (graph write is serialised via _graph_lock)
+        entities, rels, timed_out = _build_graph_timed(document, timeout=20)
+        result["entities"] = entities
+        result["rels"] = rels
+        result["steps"].append("Graph skipped (slow LLM)" if timed_out else f"Graph: {entities} entities · {rels} rels")
+
+        result["status"] = "OK"
+
+    except Exception as e:
+        result["status"] = "FAIL"
+        result["error"] = str(e)
+
+    return result
+
+
+
+
+def _kb_status() -> dict:
+    try:
+        gq = GraphQueryEngine(get_graph())
+        graph_stats = gq.get_graph_stats()
+    except Exception as e:
+        graph_stats = {"error": str(e)}
+    return {
+        "vector_store": {"total_chunks": vector_store.count(), "sources": vector_store.get_all_sources()},
+        "knowledge_graph": graph_stats,
+    }
+
+
+# ─── Helper functions ─────────────────────────────────────────────────────────
 
 
 def _render_results(result: dict):
@@ -215,20 +284,6 @@ def _render_results(result: dict):
                 st.caption(f"Events published: {', '.join(api['event_triggers'])}")
             st.divider()
 
-    with st.expander("SECTION 12: QA Sign-off Checklist", expanded=True):
-        checklist = result.get("signoff_checklist", [])
-        categories: dict = {}
-        for item in checklist:
-            cat = item.get("category", "Other")
-            categories.setdefault(cat, []).append(item)
-        for cat, items in categories.items():
-            st.markdown(f"**{cat}**")
-            for item in items:
-                status = item.get("status", "PENDING")
-                tag = {"MUST_VERIFY": "[MUST]", "AUTOMATED": "[AUTO]", "PENDING": "[PENDING]"}.get(status, "[PENDING]")
-                owner = item.get("owner", "QA")
-                st.markdown(f"  {tag} {item.get('item', '')} _(Owner: {owner})_")
-
     st.divider()
     col_exp1, col_exp2 = st.columns(2)
     with col_exp1:
@@ -260,39 +315,24 @@ with st.sidebar:
     st.caption("Three-Brain QA Architecture")
     st.divider()
 
-    # API health check
-    try:
-        health = requests.get(f"{API_BASE}/health", timeout=3).json()
-        st.success(f"API Online | Model: {health.get('model', '?')}")
-    except Exception:
-        st.error("API Offline – start backend first")
+    st.success(f"Model: {settings.LLM_MODEL}")
 
     st.divider()
 
     # Knowledge base status
     st.subheader("Knowledge Base")
     try:
-        status = requests.get(f"{API_BASE}/ingest/status", timeout=3).json()
+        status = _kb_status()
         vs = status.get("vector_store", {})
         kg = status.get("knowledge_graph", {})
         col1, col2 = st.columns(2)
         col1.metric("Chunks", vs.get("total_chunks", 0))
         col2.metric("Nodes", kg.get("total_nodes", 0))
-
         sources = vs.get("sources", [])
         if sources:
             st.caption(f"Sources: {', '.join(sources[:5])}")
     except Exception:
         st.warning("Cannot fetch KB status")
-
-    st.divider()
-
-    # Sample data loader
-    st.subheader("Load Sample Data")
-    sample_dir = Path(__file__).parent.parent / "backend" / "sample_data"
-
-    if st.button("Load All Sample Data", type="primary"):
-        _load_sample_data(sample_dir)
 
     st.divider()
     st.caption("QA Intelligence System v1.0")
@@ -306,7 +346,6 @@ tab_ingest, tab_analyze, tab_graph = st.tabs(["Ingest", "Analyze & Generate", "K
 # TAB 1: INGEST
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Map file extension / name keywords → doc_type (auto-detected)
 def _infer_doc_type(filename: str) -> str:
     name = filename.lower()
     if any(k in name for k in ["brd", "business_req", "business-req"]):
@@ -327,7 +366,8 @@ def _infer_doc_type(filename: str) -> str:
         return "test_case"
     if any(k in name for k in ["rule", "business_rule"]):
         return "business_rule"
-    return "srs"  # safe default
+    return "srs"
+
 
 with tab_ingest:
     st.header("Document Ingestion")
@@ -340,57 +380,61 @@ with tab_ingest:
     )
 
     if uploaded_files:
-        # Preview detected types
-        st.markdown("**Detected document types:**")
-        cols = st.columns(min(len(uploaded_files), 4))
-        for i, f in enumerate(uploaded_files):
-            detected = _infer_doc_type(f.name)
-            cols[i % 4].info(f"`{f.name}`\n\n→ `{detected}`")
-
-        st.caption("Rename files to include keywords (brd, srs, bug, api, schema, story, event, test, rule) for accurate auto-detection.")
-
         if st.button("Ingest All Files", type="primary", use_container_width=True):
             total = len(uploaded_files)
-            progress = st.progress(0, f"Ingesting 0 / {total}...")
-            results = []
+            max_workers = min(total, 8)  # process up to 8 files simultaneously
 
-            for i, f in enumerate(uploaded_files):
-                doc_type = _infer_doc_type(f.name)
-                with st.spinner(f"Processing `{f.name}` as `{doc_type}`..."):
-                    try:
-                        resp = requests.post(
-                            f"{API_BASE}/ingest/file",
-                            files={"file": (f.name, f.getvalue(), f.type or "application/octet-stream")},
-                            data={"doc_type": doc_type},
-                            timeout=180,
-                        )
-                        if resp.status_code == 200:
-                            r = resp.json()
-                            results.append({"file": f.name, "type": doc_type, "status": "OK",
-                                            "chunks": r["chunks_stored"],
-                                            "entities": r["entities_extracted"],
-                                            "rels": r["relationships_created"]})
-                        else:
-                            results.append({"file": f.name, "type": doc_type, "status": "FAIL",
-                                            "chunks": 0, "entities": 0, "rels": 0,
-                                            "error": resp.text[:120]})
-                    except Exception as e:
-                        results.append({"file": f.name, "type": doc_type, "status": "FAIL",
-                                        "chunks": 0, "entities": 0, "rels": 0, "error": str(e)})
-                progress.progress((i + 1) / total, f"Ingested {i + 1} / {total}: {f.name}")
+            st.info(f"Processing **{total}** file(s) in parallel (up to {max_workers} at a time)...")
+            progress = st.progress(0, f"Starting {total} parallel jobs...")
 
-            # Summary table
+            # Submit all files to the thread pool at once
+            futures = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for f in uploaded_files:
+                    doc_type = _infer_doc_type(f.name)
+                    future = executor.submit(
+                        _process_file_parallel, f.getvalue(), f.name, doc_type
+                    )
+                    futures[future] = f.name
+
+                # Collect results as each file finishes
+                results = []
+                completed = 0
+                for future in concurrent.futures.as_completed(futures):
+                    result = future.result()
+                    results.append(result)
+                    completed += 1
+                    progress.progress(completed / total, f"Completed {completed} / {total}: {result['file']}")
+
+            progress.progress(1.0, "All files processed!")
+
+            # ── Render results ────────────────────────────────────────────────
             st.divider()
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Files Processed", total)
-            c2.metric("Total Chunks", sum(r["chunks"] for r in results))
-            c3.metric("Total Entities", sum(r["entities"] for r in results))
+            ok_results  = [r for r in results if r["status"] == "OK"]
+            rejected    = [r for r in results if r["status"] == "REJECTED"]
+            failed      = [r for r in results if r["status"] == "FAIL"]
 
-            for r in results:
-                if r["status"] == "OK":
-                    st.success(f"[OK] **{r['file']}** (`{r['type']}`) — {r['chunks']} chunks · {r['entities']} entities · {r['rels']} relationships")
-                else:
-                    st.error(f"[FAIL] **{r['file']}** — {r.get('error', 'unknown error')}")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Files Uploaded", total)
+            c2.metric("Ingested", len(ok_results))
+            c3.metric("Total Entities", sum(r["entities"] for r in ok_results))
+            c4.metric("Total Chunks in KB", vector_store.count())
+
+            for r in ok_results:
+                steps_str = " → ".join(r.get("steps", []))
+                st.success(
+                    f"[INGESTED] **{r['file']}** (`{r.get('detected_type', r['type'])}`) "
+                    f"— {r['chunks']} chunks · {r['entities']} entities · {r['rels']} relationships  \n"
+                    f"`{steps_str}`"
+                )
+            for r in rejected:
+                st.warning(
+                    f"[REJECTED — NOT PROJECT DATA] **{r['file']}** "
+                    f"detected as: `{r.get('detected_type', 'unknown')}` "
+                    f"— {r.get('reason', 'Not relevant to a QA knowledge base')}"
+                )
+            for r in failed:
+                st.error(f"[ERROR] **{r['file']}** — {r.get('error', 'unknown error')}")
     else:
         st.info("No files selected yet. Upload one or more files above to populate the knowledge base.")
 
@@ -401,65 +445,52 @@ with tab_ingest:
 with tab_analyze:
     st.header("QA Analysis & Test Generation")
 
-    col_input, col_opts = st.columns([3, 1])
-    with col_input:
-        user_story = st.text_area(
-            "User Story",
-            height=140,
-            placeholder="As a [role], I want to [goal], so that [benefit]...\n\nOr paste a detailed feature description.",
-            value=""
+    user_story = st.text_area(
+        "User Story",
+        height=140,
+        placeholder="As a [role], I want to [goal], so that [benefit]...\n\nOr paste a detailed feature description.",
+        value=""
+    )
+
+    # Show KB status inline before analysis
+    _inline_status = _kb_status()
+    _chunks = _inline_status.get("vector_store", {}).get("total_chunks", 0)
+    _nodes = _inline_status.get("knowledge_graph", {}).get("total_nodes", 0)
+    if _chunks == 0 and _nodes == 0:
+        st.info(
+            "Knowledge Base is empty — analysis will run using LLM inference only. "
+            "For richer results (bug history, API contracts, regression coverage), "
+            "upload your documents in the **Ingest** tab first."
         )
-    with col_opts:
-        module_name = st.text_input("Module (optional)", placeholder="e.g. Checkout")
-        priority = st.selectbox("Priority", ["low", "medium", "high", "critical"], index=2)
-        include_gherkin = st.checkbox("Gherkin Tests", value=True)
-        include_regression = st.checkbox("Regression Suite", value=True)
-        include_api = st.checkbox("API Validation", value=True)
-        risk_threshold = st.slider("Min Risk Score", 0.0, 1.0, 0.1, 0.05)
+    else:
+        st.success(f"Knowledge Base loaded: **{_chunks} chunks** · **{_nodes} graph nodes**. Analysis will use full KB context.")
 
     if st.button("Run QA Analysis", type="primary", use_container_width=True):
         if not user_story.strip():
             st.warning("Please enter a user story")
         else:
             with st.spinner("Running Three-Brain QA Pipeline..."):
-                progress_bar = st.progress(0, "Brain 1: Querying Knowledge Graph...")
+                progress_bar = st.progress(0, "Detecting module, priority and risk from story...")
                 try:
-                    resp = requests.post(
-                        f"{API_BASE}/generate-tests/",
-                        json={
-                            "user_story": user_story,
-                            "module_name": module_name,
-                            "include_gherkin": include_gherkin,
-                            "include_regression": include_regression,
-                            "include_api_validation": include_api,
-                            "risk_threshold": risk_threshold,
-                            "max_scenarios": 60,
-                        },
-                        timeout=300,
-                    )
+                    result = qa_pipeline.run(user_story=user_story)
                     progress_bar.progress(100, "Complete!")
 
-                    if resp.status_code == 200:
-                        result = resp.json()
-                        st.session_state["qa_result"] = result
-                        complexity = result.get("complexity_level", "moderate").upper()
-                        st.success(
-                            f"Analysis complete! Complexity: **{complexity}** | "
-                            f"Risk: **{result.get('overall_risk', '?')}** | "
-                            f"Scenarios: **{result.get('total_scenarios', 0)}** | "
-                            f"Warnings: **{len(result.get('heads_up_warnings', []))}**"
-                        )
-                    else:
-                        st.error(f"API Error: {resp.text}")
-                except requests.Timeout:
-                    st.error("Request timed out. LLM may be slow – try again.")
+                    st.session_state["qa_result"] = result
+                    complexity = result.get("complexity_level", "moderate").upper()
+                    st.success(
+                        f"Analysis complete! "
+                        f"Module: **{result.get('detected_module', '?')}** | "
+                        f"Priority: **{result.get('detected_priority', '?')}** | "
+                        f"Complexity: **{complexity}** | "
+                        f"Risk: **{result.get('overall_risk', '?')}** | "
+                        f"Scenarios: **{result.get('total_scenarios', 0)}** | "
+                        f"Warnings: **{len(result.get('heads_up_warnings', []))}**"
+                    )
                 except Exception as e:
                     st.error(str(e))
 
-    # ── Display Results ───────────────────────────────────────────────────────
     if "qa_result" in st.session_state:
-        result = st.session_state["qa_result"]
-        _render_results(result)
+        _render_results(st.session_state["qa_result"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -469,19 +500,16 @@ with tab_graph:
     st.header("Knowledge Graph Explorer")
 
     try:
-        stats_resp = requests.get(f"{API_BASE}/analyze/graph-stats", timeout=5)
-        if stats_resp.status_code == 200:
-            stats = stats_resp.json()
-            cols = st.columns(6)
-            labels = ["module", "feature", "api", "bug", "testcase", "event"]
-            for i, label in enumerate(labels):
-                count = stats.get(f"{label}_count", 0)
-                cols[i].metric(f"{label.title()}s", count)
+        gq = GraphQueryEngine(get_graph())
+        stats = gq.get_graph_stats()
+        cols = st.columns(6)
+        labels = ["module", "feature", "api", "bug", "testcase", "event"]
+        for i, label in enumerate(labels):
+            count = stats.get(f"{label}_count", 0)
+            cols[i].metric(f"{label.title()}s", count)
 
-            st.metric("Total Nodes", stats.get("total_nodes", 0))
-            st.metric("Total Relationships", stats.get("total_relationships", 0))
-        else:
-            st.warning("Could not fetch graph statistics")
+        st.metric("Total Nodes", stats.get("total_nodes", 0))
+        st.metric("Total Relationships", stats.get("total_relationships", 0))
     except Exception as e:
         st.warning(f"Graph stats unavailable: {e}")
 

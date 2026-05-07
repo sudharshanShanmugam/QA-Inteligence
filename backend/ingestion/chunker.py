@@ -1,44 +1,206 @@
 """
-Intelligent document-aware chunking pipeline.
+Adaptive chunking pipeline.
 
-Step 2: Document-based structural splitting   — respects doc_type boundaries
-Step 3: Semantic refinement                   — merge tiny, split giant blocks
-Step 4: Rich metadata attachment              — section, doc_type, source, index
-Step 5: Sentence-level overlap                — last sentence of previous chunk
-         carried into next for context continuity
+The LLM analyzes the full document and recommends one of 9 strategies.
+Falls back to rule-based auto-detection if the LLM is unavailable.
+
+Strategies
+----------
+recursive_meta   – Recursive splitting + rich metadata on every chunk (recommended flat)
+auto             – Chunker inspects the doc itself and picks the best strategy
+recursive        – Smart recursive split using multiple separator tiers
+markdown_header  – Split strictly at markdown # / ## / ### / #### boundaries
+structure        – Field-aware split for typed JSON docs (user stories, bugs, APIs …)
+sentence         – Sentence-level split for dense technical content
+paragraph        – Paragraph split for narrative prose
+fixed            – Fixed character-count chunks with overlap
+token            – Approximate token-count chunks with overlap (1 token ≈ 4 chars)
 """
 
 import json
 import re
 from typing import Any, Dict, List, Tuple
 
-MIN_CHUNK_CHARS = 150    # merge chunks smaller than this with their neighbour
-MAX_CHUNK_CHARS = 1000   # split chunks larger than this at paragraph/sentence
+# ── Per-strategy size config ─────────────────────────────────────────────────
+_CFG: Dict[str, Dict[str, int]] = {
+    "recursive_meta": {"chunk": 800,  "overlap": 80,  "min": 120},
+    "auto":           {"chunk": 800,  "overlap": 80,  "min": 120},
+    "recursive":      {"chunk": 1000, "overlap": 100, "min": 150},
+    "markdown_header":{"chunk": 1200, "overlap": 0,   "min": 100},
+    "structure":      {"chunk": 1000, "overlap": 0,   "min": 150},
+    "sentence":       {"chunk": 400,  "overlap": 0,   "min":  60},
+    "paragraph":      {"chunk": 800,  "overlap": 0,   "min": 100},
+    "fixed":          {"chunk": 500,  "overlap": 50,  "min":   0},
+    "token":          {"chunk": 1024, "overlap": 128, "min":   0},  # chars ≈ tokens*4
+}
+_DEFAULT_CFG = {"chunk": 800, "overlap": 80, "min": 120}
+
+VALID_STRATEGIES = set(_CFG.keys())
 
 
 class DocumentChunker:
 
     def chunk(self, document: Dict[str, Any]) -> List[Dict[str, Any]]:
+        strategy = self._get_strategy(document)
+        cfg = _CFG.get(strategy, _DEFAULT_CFG)
+
+        # resolve "auto" to a concrete strategy via heuristics
+        if strategy == "auto":
+            strategy = self._auto_detect(document)
+            cfg = _CFG.get(strategy, _DEFAULT_CFG)
+
+        raw_chunks = self._dispatch(strategy, document, cfg)
+        refined = self._refine(raw_chunks, min_chars=cfg["min"])
+        return self._finalize(refined, document, strategy)
+
+    # ── Strategy selection ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_strategy(document: Dict[str, Any]) -> str:
+        """Ask the LLM which of the 9 strategies fits this document best."""
+        try:
+            from test_generator.llm_client import llm_client
+            return llm_client.recommend_chunking_strategy(document)
+        except Exception:
+            return "auto"
+
+    @staticmethod
+    def _auto_detect(document: Dict[str, Any]) -> str:
+        """Heuristic fallback — inspect the document and pick a strategy."""
         fmt = document.get("format", "text")
+        doc_type = document.get("doc_type", "")
+        content = document.get("content", "")
 
-        # Step 2: document-based structural split
-        if fmt == "json" and document.get("raw"):
-            raw_chunks = self._structured_split(document)
-        else:
-            raw_chunks = self._text_split(document)
+        if fmt == "json" or doc_type in {
+            "user_story", "bug_report", "api_contract", "db_schema", "event_definition"
+        }:
+            return "structure"
 
-        # Step 3: semantic refinement
-        refined = self._refine(raw_chunks)
+        md_headers = len(re.findall(r'^#{1,4}\s+', content, re.MULTILINE))
+        if md_headers >= 3:
+            return "markdown_header"
 
-        # Step 4 + 5: metadata + overlap
-        return self._finalize(refined, document)
+        numbered = len(re.findall(r'^\d+\.\s+[A-Z]', content, re.MULTILINE))
+        if numbered >= 3:
+            return "recursive_meta"
 
-    # ── Step 2a: structured split for typed JSON docs ─────────────────────────
+        avg_para = sum(len(p) for p in content.split("\n\n") if p.strip()) / max(
+            len([p for p in content.split("\n\n") if p.strip()]), 1
+        )
+        if avg_para > 600:
+            return "recursive"
 
-    def _structured_split(self, document: Dict[str, Any]) -> List[Dict[str, str]]:
+        return "recursive_meta"
+
+    # ── Dispatcher ────────────────────────────────────────────────────────────
+
+    def _dispatch(
+        self, strategy: str, document: Dict[str, Any], cfg: Dict[str, int]
+    ) -> List[Dict[str, str]]:
+        if strategy == "recursive_meta":
+            return self._recursive_meta_split(document, cfg)
+        if strategy == "recursive":
+            return self._recursive_split(document, cfg)
+        if strategy == "markdown_header":
+            return self._markdown_header_split(document)
+        if strategy == "structure":
+            return self._structure_split(document)
+        if strategy == "sentence":
+            return self._sentence_split(document, cfg)
+        if strategy == "paragraph":
+            return self._paragraph_split(document, cfg)
+        if strategy == "fixed":
+            return self._fixed_split(document, cfg)
+        if strategy == "token":
+            return self._token_split(document, cfg)
+        # unknown → recursive_meta
+        return self._recursive_meta_split(document, cfg)
+
+    # ── 1. recursive_meta ─────────────────────────────────────────────────────
+
+    def _recursive_meta_split(
+        self, document: Dict[str, Any], cfg: Dict[str, int]
+    ) -> List[Dict[str, str]]:
+        """Recursive splitting that tracks the nearest section header as metadata."""
+        content = document.get("content", "")
+        chunk_size = cfg["chunk"]
+        overlap = cfg["overlap"]
+        separators = ["\n\n", "\n", ". ", " ", ""]
+
+        raw_texts = self._recursive_split_text(content, chunk_size, overlap, separators)
+        chunks: List[Dict[str, str]] = []
+
+        # track which markdown/numbered header each chunk falls under
+        header_pattern = re.compile(
+            r'^(#{1,4}\s+.+|[0-9]+(?:\.[0-9]+)*\.?\s+[A-Z].*)$', re.MULTILINE
+        )
+        header_positions = [(m.start(), m.group().strip()) for m in header_pattern.finditer(content)]
+
+        for i, text in enumerate(raw_texts):
+            char_pos = content.find(text[:40]) if len(text) >= 40 else content.find(text)
+            section = ""
+            for pos, title in header_positions:
+                if pos <= char_pos:
+                    section = title
+                else:
+                    break
+            chunks.append({
+                "text": text,
+                "section": section or f"chunk_{i+1}",
+                "header_context": section,
+            })
+
+        return chunks
+
+    # ── 2. recursive ─────────────────────────────────────────────────────────
+
+    def _recursive_split(
+        self, document: Dict[str, Any], cfg: Dict[str, int]
+    ) -> List[Dict[str, str]]:
+        content = document.get("content", "")
+        separators = ["\n\n", "\n", ". ", " ", ""]
+        texts = self._recursive_split_text(content, cfg["chunk"], cfg["overlap"], separators)
+        return [{"text": t, "section": f"chunk_{i+1}"} for i, t in enumerate(texts)]
+
+    # ── 3. markdown_header ────────────────────────────────────────────────────
+
+    def _markdown_header_split(self, document: Dict[str, Any]) -> List[Dict[str, str]]:
+        content = document.get("content", "")
+        pattern = re.compile(r'^(#{1,4})\s+(.+)$', re.MULTILINE)
+        positions = [(m.start(), m.group(1), m.group(2).strip()) for m in pattern.finditer(content)]
+
+        if not positions:
+            return [{"text": content.strip(), "section": "body"}]
+
+        chunks: List[Dict[str, str]] = []
+        pre = content[:positions[0][0]].strip()
+        if pre:
+            chunks.append({"text": pre, "section": "preamble"})
+
+        for i, (pos, hashes, title) in enumerate(positions):
+            end = positions[i + 1][0] if i + 1 < len(positions) else len(content)
+            body = content[pos:end].strip()
+            level = len(hashes)
+            chunks.append({
+                "text": body,
+                "section": title,
+                "header_level": str(level),
+                "no_merge": True,
+            })
+
+        return chunks
+
+    # ── 4. structure ──────────────────────────────────────────────────────────
+
+    def _structure_split(self, document: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Field-aware split for typed JSON; falls back to section split for text."""
+        fmt = document.get("format", "text")
         doc_type = document.get("doc_type", "")
         raw = document.get("raw", {})
         chunks: List[Dict[str, str]] = []
+
+        if fmt != "json" or not raw:
+            return self._section_split(document)
 
         if doc_type == "user_story":
             story = (
@@ -48,21 +210,17 @@ class DocumentChunker:
                 f"so that {raw.get('benefit', '')}."
             )
             chunks.append({"text": story, "section": "story_body", "no_merge": True})
-
             acs = raw.get("acceptance_criteria", [])
             if acs:
                 chunks.append({
                     "text": "ACCEPTANCE CRITERIA:\n" + "\n".join(f"- {ac}" for ac in acs),
-                    "section": "acceptance_criteria",
-                    "no_merge": True,
+                    "section": "acceptance_criteria", "no_merge": True,
                 })
-
             brs = raw.get("business_rules", [])
             if brs:
                 chunks.append({
                     "text": "BUSINESS RULES:\n" + "\n".join(f"- {br}" for br in brs),
-                    "section": "business_rules",
-                    "no_merge": True,
+                    "section": "business_rules", "no_merge": True,
                 })
 
         elif doc_type == "bug_report":
@@ -82,8 +240,7 @@ class DocumentChunker:
                 method = ep.get("method", "GET")
                 path = ep.get("path", "")
                 text = (
-                    f"{header}\n"
-                    f"ENDPOINT: {method} {path}\n"
+                    f"{header}\nENDPOINT: {method} {path}\n"
                     f"Description: {ep.get('description', '')}\n"
                 )
                 if ep.get("request_body"):
@@ -119,37 +276,181 @@ class DocumentChunker:
             chunks.append({"text": text, "section": "event_definition"})
 
         else:
-            # Unknown JSON — fall through to text split
-            return self._text_split(document)
+            return self._section_split(document)
 
         return chunks
 
-    # ── Step 2b: structure-aware text split ───────────────────────────────────
-
-    def _text_split(self, document: Dict[str, Any]) -> List[Dict[str, str]]:
+    def _section_split(self, document: Dict[str, Any]) -> List[Dict[str, str]]:
         content = document.get("content", "")
+        max_chars = _CFG["structure"]["chunk"]
         sections = self._split_by_headers(content)
         chunks: List[Dict[str, str]] = []
-
         for section_title, body in sections:
             text = f"{section_title}\n{body}".strip() if section_title else body.strip()
             if not text:
                 continue
-
-            if len(text) > MAX_CHUNK_CHARS:
-                for i, block in enumerate(self._split_by_paragraphs(text)):
+            if len(text) > max_chars:
+                for i, block in enumerate(self._split_paragraphs(text, max_chars)):
                     label = f"{section_title}_p{i+1}" if section_title else f"para_{i+1}"
                     chunks.append({"text": block, "section": label})
             else:
                 chunks.append({"text": text, "section": section_title or "body"})
+        return chunks
+
+    # ── 5. sentence ───────────────────────────────────────────────────────────
+
+    def _sentence_split(
+        self, document: Dict[str, Any], cfg: Dict[str, int]
+    ) -> List[Dict[str, str]]:
+        content = document.get("content", "")
+        max_chars = cfg["chunk"]
+        sentences = re.split(r"(?<=[.!?])\s+", content)
+        chunks: List[Dict[str, str]] = []
+        current = ""
+        idx = 1
+        for sent in sentences:
+            sent = sent.strip()
+            if not sent:
+                continue
+            if current and len(current) + len(sent) + 1 > max_chars:
+                chunks.append({"text": current, "section": f"sent_{idx}"})
+                idx += 1
+                current = sent
+            else:
+                current = f"{current} {sent}".strip() if current else sent
+        if current:
+            chunks.append({"text": current, "section": f"sent_{idx}"})
+        return chunks
+
+    # ── 6. paragraph ─────────────────────────────────────────────────────────
+
+    def _paragraph_split(
+        self, document: Dict[str, Any], cfg: Dict[str, int]
+    ) -> List[Dict[str, str]]:
+        content = document.get("content", "")
+        max_chars = cfg["chunk"]
+        paras = [p.strip() for p in re.split(r"\n\n+", content) if p.strip()]
+        chunks: List[Dict[str, str]] = []
+        for i, para in enumerate(paras):
+            if len(para) > max_chars:
+                for j, sub in enumerate(self._split_paragraphs(para, max_chars)):
+                    chunks.append({"text": sub, "section": f"para_{i+1}_{j+1}"})
+            else:
+                chunks.append({"text": para, "section": f"para_{i+1}"})
+        return chunks
+
+    # ── 7. fixed ─────────────────────────────────────────────────────────────
+
+    def _fixed_split(
+        self, document: Dict[str, Any], cfg: Dict[str, int]
+    ) -> List[Dict[str, str]]:
+        content = document.get("content", "")
+        size = cfg["chunk"]
+        overlap = cfg["overlap"]
+        chunks: List[Dict[str, str]] = []
+        start = 0
+        idx = 1
+        while start < len(content):
+            end = start + size
+            text = content[start:end].strip()
+            if text:
+                chunks.append({"text": text, "section": f"chunk_{idx}"})
+                idx += 1
+            start = end - overlap if overlap else end
+        return chunks
+
+    # ── 8. token ─────────────────────────────────────────────────────────────
+
+    def _token_split(
+        self, document: Dict[str, Any], cfg: Dict[str, int]
+    ) -> List[Dict[str, str]]:
+        """Approximate token-based split (1 token ≈ 4 chars)."""
+        content = document.get("content", "")
+        char_limit = cfg["chunk"]   # already in char units (~tokens*4 from _CFG)
+        overlap = cfg["overlap"]
+
+        # split on whitespace boundaries to avoid cutting mid-word
+        words = content.split()
+        chunks: List[Dict[str, str]] = []
+        current_words: List[str] = []
+        current_len = 0
+        idx = 1
+
+        for word in words:
+            word_len = len(word) + 1  # +1 for space
+            if current_len + word_len > char_limit and current_words:
+                text = " ".join(current_words).strip()
+                chunks.append({"text": text, "section": f"token_chunk_{idx}"})
+                idx += 1
+                # keep overlap words
+                overlap_chars = 0
+                overlap_words: List[str] = []
+                for w in reversed(current_words):
+                    overlap_chars += len(w) + 1
+                    if overlap_chars > overlap:
+                        break
+                    overlap_words.insert(0, w)
+                current_words = overlap_words + [word]
+                current_len = sum(len(w) + 1 for w in current_words)
+            else:
+                current_words.append(word)
+                current_len += word_len
+
+        if current_words:
+            chunks.append({"text": " ".join(current_words).strip(), "section": f"token_chunk_{idx}"})
 
         return chunks
 
+    # ── Shared text utilities ─────────────────────────────────────────────────
+
+    def _recursive_split_text(
+        self, text: str, chunk_size: int, overlap: int, separators: List[str]
+    ) -> List[str]:
+        """Recursively split text trying each separator in order."""
+        if len(text) <= chunk_size:
+            return [text] if text.strip() else []
+
+        for sep in separators:
+            if sep == "" or sep in text:
+                parts = text.split(sep) if sep else list(text)
+                chunks: List[str] = []
+                current = ""
+
+                for part in parts:
+                    candidate = current + (sep if current else "") + part
+                    if len(candidate) <= chunk_size:
+                        current = candidate
+                    else:
+                        if current.strip():
+                            chunks.append(current.strip())
+                        # if this single part is still too large, recurse
+                        remaining_seps = separators[separators.index(sep) + 1:]
+                        if len(part) > chunk_size and remaining_seps:
+                            chunks.extend(
+                                self._recursive_split_text(part, chunk_size, overlap, remaining_seps)
+                            )
+                            current = ""
+                        else:
+                            current = part
+
+                if current.strip():
+                    chunks.append(current.strip())
+
+                # apply overlap: carry last `overlap` chars into next chunk
+                if overlap and len(chunks) > 1:
+                    overlapped: List[str] = [chunks[0]]
+                    for i in range(1, len(chunks)):
+                        tail = chunks[i - 1][-overlap:] if overlap < len(chunks[i - 1]) else chunks[i - 1]
+                        overlapped.append(tail + "\n" + chunks[i])
+                    return overlapped
+
+                return chunks
+
+        return [text]
+
     def _split_by_headers(self, text: str) -> List[Tuple[str, str]]:
-        """Split on markdown headings or numbered section markers."""
         pattern = re.compile(
-            r'^(#{1,4}\s+.+|[0-9]+(?:\.[0-9]+)*\.?\s+[A-Z].*)$',
-            re.MULTILINE,
+            r'^(#{1,4}\s+.+|[0-9]+(?:\.[0-9]+)*\.?\s+[A-Z].*)$', re.MULTILINE
         )
         positions = [(m.start(), m.group().strip()) for m in pattern.finditer(text)]
         if not positions:
@@ -167,18 +468,16 @@ class DocumentChunker:
 
         return sections
 
-    def _split_by_paragraphs(self, text: str) -> List[str]:
-        """Break large blocks at double newlines, then sentences."""
+    def _split_paragraphs(self, text: str, max_chars: int) -> List[str]:
         paras = [p.strip() for p in re.split(r"\n\n+", text) if p.strip()]
         result: List[str] = []
         for para in paras:
-            if len(para) <= MAX_CHUNK_CHARS:
+            if len(para) <= max_chars:
                 result.append(para)
                 continue
-            # Sentence-level split for oversized paragraphs
             current = ""
             for sent in re.split(r"(?<=[.!?])\s+", para):
-                if len(current) + len(sent) > MAX_CHUNK_CHARS and current:
+                if len(current) + len(sent) > max_chars and current:
                     result.append(current.strip())
                     current = sent
                 else:
@@ -187,49 +486,47 @@ class DocumentChunker:
                 result.append(current.strip())
         return result
 
-    # ── Step 3: semantic refinement ───────────────────────────────────────────
+    # ── Refinement ────────────────────────────────────────────────────────────
 
-    def _refine(self, raw_chunks: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        """Merge chunks that are too small into their following neighbour.
-        Chunks with no_merge=True are always kept as independent units.
-        """
+    def _refine(
+        self, raw_chunks: List[Dict[str, str]], min_chars: int = 120
+    ) -> List[Dict[str, str]]:
         if not raw_chunks:
             return []
 
         refined: List[Dict[str, str]] = []
-        buf_text = ""
-        buf_section = ""
+        buf: Dict[str, str] = {}
 
         for chunk in raw_chunks:
             text = chunk.get("text", "").strip()
-            section = chunk.get("section", "")
-            no_merge = chunk.get("no_merge", False)
             if not text:
                 continue
+            no_merge = chunk.get("no_merge", False)
 
             if no_merge:
-                # Flush any accumulated buffer first
-                if buf_text:
-                    refined.append({"text": buf_text, "section": buf_section})
-                    buf_text = ""
-                refined.append({"text": text, "section": section})
-            elif buf_text and len(buf_text) < MIN_CHUNK_CHARS:
-                buf_text += "\n\n" + text
+                if buf:
+                    refined.append(buf)
+                    buf = {}
+                refined.append(chunk)
+            elif buf and len(buf.get("text", "")) < min_chars:
+                buf["text"] += "\n\n" + text
             else:
-                if buf_text:
-                    refined.append({"text": buf_text, "section": buf_section})
-                buf_text = text
-                buf_section = section
+                if buf:
+                    refined.append(buf)
+                buf = {k: v for k, v in chunk.items()}
 
-        if buf_text:
-            refined.append({"text": buf_text, "section": buf_section})
+        if buf:
+            refined.append(buf)
 
         return refined
 
-    # ── Step 4 + 5: metadata + overlap ────────────────────────────────────────
+    # ── Finalization: metadata + overlap ──────────────────────────────────────
 
     def _finalize(
-        self, chunks: List[Dict[str, str]], document: Dict[str, Any]
+        self,
+        chunks: List[Dict[str, str]],
+        document: Dict[str, Any],
+        strategy: str,
     ) -> List[Dict[str, Any]]:
         source_id = document.get("source_id", "")
         doc_type = document.get("doc_type", "")
@@ -240,13 +537,18 @@ class DocumentChunker:
         for i, chunk in enumerate(chunks):
             text = chunk["text"]
 
-            # Step 5: sentence-level overlap — prepend last sentence of previous chunk
+            # sentence-level overlap — prepend last sentence of previous chunk
             if i > 0:
                 overlap = self._last_sentence(chunks[i - 1]["text"])
                 if overlap and not text.startswith(overlap[:30]):
                     text = f"[context: {overlap}]\n{text}"
 
-            # ChromaDB requires metadata values to be scalar (str/int/float/bool)
+            # scalar metadata only (ChromaDB requirement)
+            extra: Dict[str, Any] = {
+                k: v for k, v in chunk.items()
+                if k not in ("text", "no_merge") and isinstance(v, (str, int, float, bool))
+            }
+
             result.append({
                 "text": text,
                 "chunk_index": i,
@@ -260,13 +562,15 @@ class DocumentChunker:
                     "section": chunk.get("section", ""),
                     "chunk_index": i,
                     "total_chunks": total,
+                    "chunking_strategy": strategy,
+                    **extra,
                 },
             })
 
         return result
 
-    def _last_sentence(self, text: str) -> str:
-        """Return the last meaningful sentence (capped at 120 chars)."""
+    @staticmethod
+    def _last_sentence(text: str) -> str:
         sentences = re.split(r"(?<=[.!?])\s+", text.strip())
         for sent in reversed(sentences):
             sent = sent.strip()

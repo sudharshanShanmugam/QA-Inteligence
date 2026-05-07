@@ -1,0 +1,37 @@
+BUG REPORT: CHECKOUT MODULE
+==============================
+
+BUG-001: Coupon applied but discount not reflected in total
+- Severity: HIGH
+- Status: OPEN
+- Module: Checkout
+- Feature: Coupon Application
+- Root Cause: Race condition between coupon validation and price calculation service
+- Reported: 2026-04-10
+- Occurrences: 47 in last 30 days
+
+BUG-002: Payment processing hangs indefinitely on slow network
+- Severity: CRITICAL
+- Status: IN_PROGRESS
+- Module: Payment
+- Feature: Payment Processing
+- Root Cause: Missing timeout on payment gateway HTTP call; no fallback state
+- Reported: 2026-04-15
+- Occurrences: 12 in last 7 days — revenue impact
+
+BUG-003: Order cancellation allowed after 30-minute window
+- Severity: MEDIUM
+- Status: OPEN
+- Module: Order Management
+- Feature: Order Cancellation
+- Root Cause: Server clock skew between order service and cancellation service
+- Reported: 2026-04-20
+- Occurrences: 8 in last 30 days
+
+BUG-004: Inventory not reserved during CHECKOUT_PENDING state
+- Severity: HIGH
+- Status: OPEN
+- Module: Inventory
+- Feature: Stock Reservation
+- Root Cause: Reservation call missing in checkout initiation flow
+- Occurrences: 23 in last 30 days — causes overselling
