@@ -109,11 +109,12 @@ docker-compose.override.yml
 *.prof
 *.lprof
 
-# Secrets & credentials (keep .env tracked)
+# Secrets & credentials
+.env
+.env.*
 *.pem
 *.key
 *.p12
 *.pfx
 secrets/
 credentials/
-!.env
