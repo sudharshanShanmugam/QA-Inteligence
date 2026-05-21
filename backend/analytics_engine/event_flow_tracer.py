@@ -36,38 +36,50 @@ class EventFlowTracer:
         # ── UI Layer ──────────────────────────────────────────────────────────
         steps.append(self._step(
             step_num, "UI",
-            component=f"{feature_name} Screen/Component",
-            action="User triggers action (form submit / button click)",
-            data="User input payload",
+            component=f"{feature_name} — User Interface",
+            action="User fills in the form and submits, or clicks the action button to trigger the operation",
+            data="Form input data entered by the user",
             validation_point=(
-                "Validate: client-side form validation fires; "
-                "loading state shown; inputs sanitised before send"
+                "Client-side validation runs before the request is sent — "
+                "required fields are filled, formats are correct, and a loading indicator appears. "
+                "Input is sanitised to prevent malformed data reaching the server."
             ),
         ))
         step_num += 1
 
         # ── API Layer ─────────────────────────────────────────────────────────
         if apis:
-            for api in apis[:3]:  # Show top 3 APIs
+            for api in apis[:3]:
+                method   = api.get("method", "POST")
+                endpoint = api.get("endpoint", api.get("name", "API endpoint"))
                 steps.append(self._step(
                     step_num, "API",
-                    component=f"{api.get('method', 'POST')} {api.get('endpoint', api.get('name', 'API'))}",
-                    action="HTTP request received; auth validated; request parsed",
-                    data="Validated request body / query params",
+                    component=f"{method} {endpoint}",
+                    action=(
+                        f"The server receives the {method} request, verifies the caller's identity, "
+                        "and parses the incoming payload"
+                    ),
+                    data="Validated request body and any query parameters",
                     validation_point=(
-                        "Validate: auth token present & not expired; "
-                        "request body schema valid; rate-limit not exceeded; "
-                        "business rule enforcement"
+                        "The authentication token is present and has not expired. "
+                        "The request body matches the expected schema (no missing required fields, correct data types). "
+                        "The caller has not exceeded their rate limit. "
+                        "Business rules are enforced before any data is written."
                     ),
                 ))
                 step_num += 1
         else:
             steps.append(self._step(
                 step_num, "API",
-                component=f"{feature_name} REST API",
-                action="HTTP request received and validated",
-                data="Request payload",
-                validation_point="Validate: auth, schema, rate limit, idempotency key (if applicable)",
+                component=f"{feature_name} — REST API",
+                action="The server receives the HTTP request, verifies authentication, and validates the payload",
+                data="Request body and query parameters",
+                validation_point=(
+                    "Authentication token is present and valid. "
+                    "Request payload passes schema validation. "
+                    "Rate limit has not been exceeded. "
+                    "An idempotency key is checked if the operation can be safely retried."
+                ),
             ))
             step_num += 1
 
@@ -76,81 +88,98 @@ class EventFlowTracer:
             for tbl in db_tables[:3]:
                 steps.append(self._step(
                     step_num, "DB",
-                    component=f"Table: {tbl.get('name', 'database')}",
-                    action="Read/Write operation executed within transaction",
-                    data=f"Schema: {tbl.get('schema_def', 'see DB schema')}",
+                    component=f"Database table: {tbl.get('name', 'storage')}",
+                    action="The data is read from or written to the database inside a transaction",
+                    data=f"Entity data — schema: {tbl.get('schema_def', 'see DB schema documentation')}",
                     validation_point=(
-                        "Validate: record created/updated correctly; "
-                        "constraints enforced (FK, unique, not-null); "
-                        "transaction rolled back on error"
+                        "The record is created or updated correctly with all expected fields. "
+                        "Database constraints are enforced — unique values, required fields, and "
+                        "foreign key relationships are all respected. "
+                        "If an error occurs, the entire transaction is rolled back with no partial writes."
                     ),
                 ))
                 step_num += 1
         else:
             steps.append(self._step(
                 step_num, "DB",
-                component="Database (persistence layer)",
-                action="Data persisted / retrieved",
-                data="Entity state change",
-                validation_point="Validate: ACID properties; constraint violations return correct errors",
+                component="Database — persistence layer",
+                action="The operation's data is saved to or retrieved from the database",
+                data="The entity being created, updated, or deleted",
+                validation_point=(
+                    "The record is stored with all required fields populated correctly. "
+                    "Uniqueness and referential integrity constraints are respected. "
+                    "Any error causes a full rollback, leaving no partial or corrupt data behind."
+                ),
             ))
             step_num += 1
 
         # ── Event Layer ───────────────────────────────────────────────────────
         if events:
             for ev in events[:3]:
+                topic = ev.get("topic", ev.get("name", "domain event"))
                 steps.append(self._step(
                     step_num, "Event",
-                    component=f"Topic: {ev.get('topic', ev.get('name', 'event'))}",
-                    action=f"Event published: {ev.get('name', 'domain_event')}",
-                    data=f"Payload schema: {ev.get('payload_schema', 'see event definition')}",
+                    component=f"Message broker — topic: {topic}",
+                    action=(
+                        f"After the database write succeeds, the '{topic}' event is published "
+                        "to notify downstream services of the change"
+                    ),
+                    data=f"Event payload — schema: {ev.get('payload_schema', 'see event definition')}",
                     validation_point=(
-                        "Validate: event published exactly once (idempotency); "
-                        "payload matches schema; correct partition key; "
-                        "correct headers / metadata"
+                        "The event is published exactly once — no duplicates even on retry. "
+                        "The payload contains all required fields and matches the agreed schema. "
+                        "The correct partition key and message headers are set. "
+                        "No event is published if the database transaction was rolled back."
                     ),
                 ))
                 step_num += 1
         else:
             steps.append(self._step(
                 step_num, "Event",
-                component="Message Broker (Kafka / RabbitMQ / SQS)",
-                action="Domain event published after successful DB write",
-                data="Event payload with correlation ID",
+                component="Message broker (Kafka / RabbitMQ / SQS)",
+                action=(
+                    "After a successful database write, a domain event is published "
+                    "to inform other services of the state change"
+                ),
+                data="Event payload containing the updated entity data and a correlation ID",
                 validation_point=(
-                    "Validate: event published post-commit (outbox pattern); "
-                    "no events on rollback; dead-letter queue handling"
+                    "Event is published only after the database transaction commits (outbox pattern). "
+                    "No event is emitted if the transaction fails. "
+                    "Failed deliveries are routed to a dead-letter queue for investigation."
                 ),
             ))
             step_num += 1
 
         # ── Consumer Layer ────────────────────────────────────────────────────
-        consumer_modules = [m for m in modules if "consumer" in m.get("name", "").lower()
-                            or "subscriber" in m.get("name", "").lower()
-                            or "worker" in m.get("name", "").lower()]
+        consumer_modules = [
+            m for m in modules
+            if any(k in m.get("name", "").lower() for k in ("consumer", "subscriber", "worker", "listener"))
+        ]
         if consumer_modules:
             for cm in consumer_modules[:2]:
                 steps.append(self._step(
                     step_num, "Consumer",
-                    component=cm.get("name", "consumer"),
-                    action="Event consumed; business logic applied",
-                    data="Processed event payload",
+                    component=cm.get("name", "consumer service"),
+                    action="The consumer service receives the event and carries out its downstream business logic",
+                    data="Consumed event payload",
                     validation_point=(
-                        "Validate: at-least-once processing handled; "
-                        "idempotency checks; error → dead-letter; "
-                        "consumer lag monitored"
+                        "The event is processed exactly once — duplicate deliveries are safely ignored. "
+                        "On processing failure the message is retried; after repeated failures "
+                        "it is moved to a dead-letter queue. "
+                        "Consumer lag stays within acceptable bounds under normal load."
                     ),
                 ))
                 step_num += 1
         else:
             steps.append(self._step(
                 step_num, "Consumer",
-                component="Event Consumer / Worker Service",
-                action="Event consumed; downstream processing triggered",
-                data="Processed payload",
+                component="Event consumer / background worker service",
+                action="The downstream service receives the event and applies any follow-on business logic",
+                data="Consumed event payload",
                 validation_point=(
-                    "Validate: idempotent consumption; "
-                    "failure handling (retry/DLQ); order guarantee (if required)"
+                    "Processing is idempotent — running the same event twice produces the same result. "
+                    "Failures trigger retries and ultimately land in a dead-letter queue. "
+                    "Message ordering is preserved where the business logic requires it."
                 ),
             ))
             step_num += 1
@@ -158,13 +187,14 @@ class EventFlowTracer:
         # ── Notification Layer ────────────────────────────────────────────────
         steps.append(self._step(
             step_num, "Notification",
-            component="Notification Service (email / push / SMS / webhook)",
-            action="End-user notified of outcome",
-            data="Notification content with action result",
+            component="Notification service (email / push / SMS / webhook)",
+            action="The user or an external system is informed of the operation outcome",
+            data="Notification message containing the action result",
             validation_point=(
-                "Validate: notification sent to correct recipient; "
-                "correct template used; no duplicate notifications; "
-                "PII not leaked in notification body"
+                "The notification is sent to the correct recipient only. "
+                "The right template and channel are used for the event type. "
+                "No duplicate notifications are sent if the event is retried. "
+                "No personal or sensitive data is exposed in the notification body or subject line."
             ),
         ))
 
@@ -178,7 +208,7 @@ class EventFlowTracer:
                 "id": f"FLOW-{step['step']:03d}-{step['layer']}",
                 "type": "event_flow",
                 "scenario_type": "functional",
-                "title": f"[{step['layer']}] {step['action']}",
+                "title": f"{step['layer']} layer — {step['action']}",
                 "description": step["validation_point"],
                 "component": step["component"],
                 "steps": [

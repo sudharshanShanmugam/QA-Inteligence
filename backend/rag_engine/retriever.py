@@ -64,21 +64,53 @@ class RAGRetriever:
         hits = vector_store.search(query, top_k=top_k, doc_type_filter="api_contract")
         return [h["text"] for h in hits]
 
-    def build_context_string(self, retrieval_result: Dict[str, Any], max_chars: int = 4000) -> str:
-        """Flatten retrieved context into a single string for the LLM prompt."""
-        lines: List[str] = []
+    def build_context_string(self, retrieval_result: Dict[str, Any], max_chars: int = 8000) -> str:
+        """
+        Flatten retrieved context into a clearly structured string for the LLM.
+        Spec documents are placed first so the LLM reads the most actionable
+        content before any truncation kicks in.
+        """
+        _LABELS = {
+            "user_story":       "USER STORIES / ACCEPTANCE CRITERIA",
+            "brd":              "BUSINESS REQUIREMENTS DOCUMENT (BRD)",
+            "srs":              "SOFTWARE REQUIREMENTS SPECIFICATION (SRS)",
+            "business_rule":    "BUSINESS RULES",
+            "api_contract":     "API CONTRACTS / ENDPOINTS",
+            "db_schema":        "DATABASE SCHEMA / FIELD DEFINITIONS",
+            "event_definition": "EVENTS / MESSAGE FORMATS",
+            "test_case":        "EXISTING TEST CASES",
+            "bug_report":       "HISTORICAL BUG REPORTS",
+            "other":            "OTHER DOCUMENTS",
+        }
+        # Spec docs first — they contain field names, rules, and acceptance criteria
+        priority = [
+            "user_story", "brd", "srs", "business_rule",
+            "api_contract", "db_schema", "event_definition",
+            "test_case", "bug_report", "other",
+        ]
         ctx = retrieval_result.get("context_by_type", {})
+        lines: List[str] = []
 
-        for doc_type, chunks in ctx.items():
+        for doc_type in priority:
+            chunks = ctx.get(doc_type, [])
             if not chunks:
                 continue
-            lines.append(f"\n=== {doc_type.upper().replace('_', ' ')} ===")
-            for chunk in chunks:
-                lines.append(chunk)
+            label = _LABELS.get(doc_type, doc_type.upper())
+            lines.append(f"\n{'─'*60}")
+            lines.append(f"[{label}]")
+            lines.append(f"{'─'*60}")
+            for i, chunk in enumerate(chunks, 1):
+                lines.append(f"\n--- Excerpt {i} ---")
+                lines.append(chunk.strip())
 
         full = "\n".join(lines)
+        if not full.strip():
+            return ""
         if len(full) > max_chars:
-            full = full[:max_chars] + "\n...[truncated for prompt length]"
+            full = full[:max_chars] + (
+                "\n\n[Note: additional content was truncated — "
+                "use the excerpts shown above to ground your response.]"
+            )
         return full
 
 

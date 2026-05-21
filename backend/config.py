@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     # DeepInfra
     DEEPINFRA_API_KEY: str = ""
     DEEPINFRA_BASE_URL: str = "https://api.deepinfra.com/v1/openai"
-    LLM_MODEL: str = "openai/gpt-oss-120b"
+    LLM_MODEL: str = "openai/gpt-oss-120b-Turbo"
     EMBED_MODEL: str = "BAAI/bge-large-en-v1.5"
     ENTITY_MODEL: str = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 

@@ -32,6 +32,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Persist token usage across reruns (sidebar renders before pipeline runs)
+if "token_usage" not in st.session_state:
+    st.session_state["token_usage"] = {"input_tokens": 0, "output_tokens": 0}
+
 # ─── CSS ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -161,6 +165,26 @@ def _kb_status() -> dict:
 def _render_results(result: dict):
     st.divider()
 
+    # ── Feature status badge (existing / partial / new) ───────────────────
+    feature_status = result.get("feature_status", "new")
+    status_cfg = {
+        "existing": ("#1a5276", "#d6eaf8", "EXISTING FEATURE",
+                     "Prior knowledge found in KB — regression and change-impact focus applied."),
+        "partial":  ("#7d6608", "#fef9e7", "PARTIALLY KNOWN FEATURE",
+                     "Some KB context found — analysis blends existing knowledge with new coverage."),
+        "new":      ("#1e8449", "#d5f5e3", "NEW FEATURE",
+                     "No matching KB content — comprehensive test generation from scratch."),
+    }
+    fg, bg, label, hint = status_cfg.get(feature_status, status_cfg["new"])
+    st.markdown(
+        f'<div style="background:{bg}; border-left:5px solid {fg}; padding:10px 14px; '
+        f'border-radius:6px; margin-bottom:8px; color:#000;">'
+        f'<strong style="color:{fg};">{label}</strong><br/>'
+        f'<span style="font-size:0.85rem;">{result.get("feature_status_reason", hint)}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
     complexity = result.get("complexity_level", "moderate")
     complexity_colors = {"simple": "#d4edda", "moderate": "#fff3cd", "complex": "#f8d7da"}
     complexity_bg = complexity_colors.get(complexity, "#fff3cd")
@@ -171,10 +195,26 @@ def _render_results(result: dict):
         unsafe_allow_html=True,
     )
 
-    with st.expander("SECTION 1: Feature Understanding", expanded=True):
+    # ── Grounding / hallucination warnings ───────────────────────────────
+    if result.get("kb_sparse"):
+        st.warning(
+            "**Sparse KB context** — the knowledge base returned little relevant content for this story. "
+            "Scenario counts have been reduced and all scenarios are derived from the user story text only. "
+            "Upload the BRD, SRS, or acceptance criteria for this feature to get fully grounded test cases.",
+            icon="⚠️",
+        )
+    if result.get("apis_inferred"):
+        st.info(
+            "**API endpoints inferred** — no API contracts were found in the knowledge base, so endpoints "
+            "were inferred from the user story by the LLM. Upload an API contract or Swagger spec to "
+            "replace inferred endpoints with verified ones.",
+            icon="ℹ️",
+        )
+
+    with st.expander("Feature Understanding", expanded=True):
         st.markdown(result.get("feature_understanding", "N/A"))
 
-    with st.expander("SECTION 2: Impacted Modules", expanded=True):
+    with st.expander("Impacted Modules", expanded=True):
         modules = result.get("impacted_modules", [])
         if modules:
             for m in modules:
@@ -185,16 +225,55 @@ def _render_results(result: dict):
         else:
             st.info("No specific module data in knowledge graph – ingest module documentation first.")
 
-    with st.expander("SECTION 3: End-to-End Event Flow", expanded=False):
+    _LAYER_COLOR = {
+        "UI":           "#1565c0",
+        "API":          "#6a1b9a",
+        "DB":           "#2e7d32",
+        "Event":        "#e65100",
+        "Consumer":     "#4e342e",
+        "Notification": "#00695c",
+    }
+
+    with st.expander("End-to-End Event Flow", expanded=False):
         flow = result.get("event_flow", [])
         if flow:
-            for step in flow:
-                layer = step.get("layer", "")
-                st.markdown(f"**[{layer}]** `{step.get('component', '')}` — {step.get('action', '')}")
-                st.caption(f"Validate: {step.get('validation_point', '')}")
-                st.divider()
+            for entry in flow:
+                layer      = entry.get("layer", "")
+                component  = entry.get("component", "")
+                action     = entry.get("action", "")
+                data       = entry.get("data", "")
+                validation = entry.get("validation_point", "")
+                step_num   = entry.get("step", "")
+                color      = _LAYER_COLOR.get(layer, "#37474f")
 
-    with st.expander("SECTION 4: Risk Areas", expanded=True):
+                data_row = (
+                    f'<div style="margin-top:6px;font-size:13px;color:#555;">'
+                    f'<strong>Data passing through:</strong> {data}</div>'
+                ) if data else ""
+
+                st.markdown(
+                    f'<div style="border-left:4px solid {color};padding:12px 16px;'
+                    f'margin-bottom:14px;background:#fafafa;border-radius:0 6px 6px 0;">'
+                    f'<span style="background:{color};color:white;padding:2px 10px;'
+                    f'border-radius:4px;font-size:12px;font-weight:bold">'
+                    f'Step {step_num} — {layer}</span>'
+                    f'<div style="margin-top:8px;font-weight:bold;color:#111;font-size:14px">{component}</div>'
+                    f'<div style="margin-top:4px;color:#333;font-size:13px">{action}</div>'
+                    f'{data_row}'
+                    f'<div style="margin-top:10px;background:#e8f5e9;padding:8px 12px;'
+                    f'border-radius:4px;font-size:13px;color:#1b5e20;">'
+                    f'<strong>What to validate:</strong> {validation}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info(
+                "No flow data available. "
+                "Upload API contracts, event definitions, or module documentation in the Ingest tab "
+                "to generate a detailed end-to-end flow for this feature."
+            )
+
+    with st.expander("Risk Areas", expanded=True):
         risks = result.get("risk_areas", [])
         if risks:
             for r in risks:
@@ -205,45 +284,195 @@ def _render_results(result: dict):
                     st.caption(f"  • {reason}")
                 st.caption(f"  Past bugs: {r.get('past_bug_count', 0)}")
 
-    with st.expander(f"SECTION 5: HEADS-UP Warnings ({len(result.get('heads_up_warnings', []))})", expanded=True):
-        warnings = result.get("heads_up_warnings", [])
-        if warnings:
-            for w in warnings:
-                sev = w.get("severity", "").lower()
-                bg = {"critical": "#ffcccc", "blocker": "#ffcccc", "high": "#ffe4cc"}.get(sev, "#fff9cc")
-                st.markdown(f"""
-                <div style="background:{bg}; padding:10px; border-radius:6px; margin-bottom:8px; color:#000000;">
-                    <strong>{w.get('warning', '')}</strong><br/>
-                    <em>Bug: {w.get('bug_title', 'N/A')} ({w.get('severity', '?')})</em><br/>
-                    {w.get('recommendation', '')}
-                </div>""", unsafe_allow_html=True)
+    _SEV_STYLE = {
+        "blocker":  ("#7b0000", "#ffebee", "#c62828"),
+        "critical": ("#7b0000", "#ffebee", "#c62828"),
+        "p1":       ("#7b0000", "#ffebee", "#c62828"),
+        "high":     ("#e65100", "#fff3e0", "#ef6c00"),
+        "p2":       ("#e65100", "#fff3e0", "#ef6c00"),
+        "medium":   ("#f57f17", "#fffde7", "#f9a825"),
+        "p3":       ("#f57f17", "#fffde7", "#f9a825"),
+        "low":      ("#1b5e20", "#f1f8e9", "#388e3c"),
+    }
+
+    with st.expander(
+        f"Heads-Up Warnings  —  {len(result.get('heads_up_warnings', []))} pattern-matched risk(s) found",
+        expanded=True,
+    ):
+        warnings_list = result.get("heads_up_warnings", [])
+        if warnings_list:
+            for w in warnings_list:
+                sev        = w.get("severity", "medium").lower()
+                text_color, bg_color, border_color = _SEV_STYLE.get(sev, ("#37474f", "#fafafa", "#78909c"))
+                pattern    = w.get("pattern")
+                bug_id     = w.get("similar_bug_id", "")
+                bug_title  = w.get("bug_title", "Unknown bug")
+                module     = w.get("module")
+                advice     = w.get("pattern_advice")
+                root_cause = w.get("root_cause")
+                action     = w.get("recommendation", "")
+
+                sev_badge = (
+                    f'<span style="background:{border_color};color:white;padding:2px 10px;'
+                    f'border-radius:4px;font-size:12px;font-weight:bold">{sev.upper()}</span>'
+                )
+                pattern_badge = (
+                    f'<span style="background:#e8eaf6;color:#3949ab;padding:2px 10px;'
+                    f'border-radius:4px;font-size:12px;margin-left:6px">{pattern}</span>'
+                ) if pattern else ""
+
+                bug_ref = f"{bug_title}"
+                if bug_id:
+                    bug_ref += f" <span style='color:#888;font-size:12px'>({bug_id})</span>"
+                if module:
+                    bug_ref += f" &nbsp;·&nbsp; <span style='color:#555;font-size:12px'>Module: {module}</span>"
+
+                advice_row = (
+                    f'<div style="margin-top:10px;">'
+                    f'<div style="font-size:12px;font-weight:bold;color:#555;text-transform:uppercase;letter-spacing:0.5px">Why this matters</div>'
+                    f'<div style="margin-top:3px;color:#222;font-size:13px">{advice}</div>'
+                    f'</div>'
+                ) if advice else ""
+
+                root_row = (
+                    f'<div style="margin-top:10px;">'
+                    f'<div style="font-size:12px;font-weight:bold;color:#555;text-transform:uppercase;letter-spacing:0.5px">Original root cause</div>'
+                    f'<div style="margin-top:3px;color:#222;font-size:13px">{root_cause}</div>'
+                    f'</div>'
+                ) if root_cause else ""
+
+                st.markdown(
+                    f'<div style="border-left:4px solid {border_color};background:{bg_color};'
+                    f'padding:14px 16px;border-radius:0 8px 8px 0;margin-bottom:14px;color:#000;">'
+                    f'<div>{sev_badge}{pattern_badge}</div>'
+                    f'<div style="margin-top:10px;font-weight:bold;font-size:14px;color:{text_color}">'
+                    f'{w.get("warning", "")}</div>'
+                    f'<div style="margin-top:6px;color:#333;font-size:13px">'
+                    f'<strong>Similar past bug:</strong> {bug_ref}</div>'
+                    f'{advice_row}'
+                    f'{root_row}'
+                    f'<div style="margin-top:10px;background:rgba(0,0,0,0.05);padding:8px 12px;'
+                    f'border-radius:4px;font-size:13px;color:#222;">'
+                    f'<strong>What to do:</strong> {action}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
         else:
-            st.success("No pattern-matched warnings.")
+            st.success("No pattern-matched warnings found — no historically similar bugs detected for this feature.")
 
-    with st.expander(f"SECTION 6: Test Scenarios ({len(result.get('test_scenarios', []))})", expanded=False):
+    import re as _re
+
+    def _humanize_title(title: str) -> str:
+        """Convert technical state-transition notation to plain English."""
+        # "Entity: STATE →[EVENT]→ STATE"
+        m = _re.match(r'^(.+?):\s*([A-Z][A-Z_]+)\s*→\[([A-Z_]+)\]→\s*([A-Z][A-Z_]+)$', title)
+        if m:
+            entity, from_s, event, to_s = m.groups()
+            return (f"{entity}: Status changes from '{from_s.replace('_',' ').title()}'"
+                    f" to '{to_s.replace('_',' ').title()}'"
+                    f" when '{event.replace('_',' ').title()}' is triggered")
+
+        # "Entity: REJECT 'EVENT' in state 'STATE'"
+        m = _re.match(r"^(.+?):\s*REJECT\s+'([A-Z_]+)'\s+in state\s+'([A-Z_]+)'$", title)
+        if m:
+            entity, event, state = m.groups()
+            return (f"{entity}: '{event.replace('_',' ').title()}' should be blocked"
+                    f" when status is '{state.replace('_',' ').title()}'")
+
+        # "Entity: Sequence [S → S → S]"
+        m = _re.match(r'^(.+?):\s*Sequence\s+\[(.+)\]$', title)
+        if m:
+            entity, seq = m.groups()
+            readable = ' → '.join(
+                p.strip().replace('_', ' ').title()
+                for p in _re.split(r'→', seq)
+            )
+            return f"{entity}: End-to-end journey — {readable}"
+
+        # "Combination test — Param = Value, Param = Value"
+        if title.lower().startswith("combination test"):
+            return title.replace("Combination test —", "Test with:")
+
+        # "Decision: condition=YES, condition=NO"
+        if title.lower().startswith("decision:"):
+            return title.replace("Decision:", "Check behaviour when:")
+
+        return title
+
+    _TYPE_LABELS = {
+        "functional":            "Functional Test",
+        "boundary_value":        "Boundary Value",
+        "equivalence_partition": "Equivalence Partition",
+        "pairwise":              "Combination Test",
+        "decision_table":        "Decision Check",
+        "state_transition":      "State Transition",
+        "event_flow":            "Event Flow",
+        "edge_case":             "Edge Case",
+    }
+    _RISK_STYLE = {
+        "high":   ("background:#c0392b;color:white",   "High Risk"),
+        "medium": ("background:#e67e22;color:white",   "Medium Risk"),
+        "low":    ("background:#27ae60;color:white",   "Low Risk"),
+    }
+
+    with st.expander(f"Test Scenarios  —  {len(result.get('test_scenarios', []))} scenarios generated", expanded=False):
         scenarios = result.get("test_scenarios", [])
-        type_filter = st.multiselect(
-            "Filter by type",
-            ["boundary_value", "equivalence_partition", "pairwise", "decision_table",
-             "state_transition", "event_flow", "edge_case"],
-            default=[], key="scenario_filter",
-        )
-        filtered = [s for s in scenarios if not type_filter or s.get("type") in type_filter]
-        for s in filtered[:30]:
-            stype = s.get("type", "").replace("_", " ").upper()
-            risk_level = s.get("risk_level", "low").upper()
-            with st.expander(f"[{risk_level}] [{stype}] {s.get('id', '')} – {s.get('title', '')[:80]}", expanded=False):
-                st.caption(f"Traceability: {s.get('traceability', 'N/A')}")
-                if s.get("preconditions"):
-                    st.markdown("**Preconditions:**")
-                    for p in s["preconditions"]:
-                        st.markdown(f"  - {p}")
-                st.markdown("**Steps:**")
-                for i, step in enumerate(s.get("steps", []), 1):
-                    st.markdown(f"  {i}. {step}")
-                st.markdown(f"**Expected:** {s.get('expected_result', '')}")
 
-    with st.expander(f"SECTION 7: Gherkin Test Cases ({len(result.get('gherkin_test_cases', []))})", expanded=False):
+        filtered = scenarios
+
+        for s in filtered[:30]:
+            stype      = _TYPE_LABELS.get(s.get("type", ""), s.get("type", "").replace("_", " ").title())
+            risk_level = s.get("risk_level", "low").lower()
+            risk_style, risk_label = _RISK_STYLE.get(risk_level, ("background:#7f8c8d;color:white", risk_level.upper()))
+
+            human_title = _humanize_title(s.get("title", ""))
+            with st.expander(human_title[:100], expanded=False):
+                # ── ID chip + technique tag + risk badge ───────────────────
+                tc_id = s.get("id", "")
+                st.markdown(
+                    f'<span style="background:#eceff1;color:#546e7a;padding:2px 8px;'
+                    f'border-radius:4px;font-size:11px;font-family:monospace">{tc_id}</span>'
+                    f'&nbsp;&nbsp;'
+                    f'<span style="background:#e8eaf6;color:#3949ab;padding:3px 10px;'
+                    f'border-radius:4px;font-size:12px">{stype}</span>'
+                    f'&nbsp;&nbsp;'
+                    f'<span style="{risk_style};padding:3px 10px;border-radius:4px;'
+                    f'font-size:12px;font-weight:bold">{risk_label}</span>',
+                    unsafe_allow_html=True,
+                )
+                st.write("")
+
+                if s.get("traceability"):
+                    st.markdown(
+                        f'<div style="font-size:12px;color:#555;background:#f1f3f4;'
+                        f'padding:4px 10px;border-radius:4px;margin-bottom:10px;">'
+                        f'<strong>Covers:</strong> {s.get("traceability")}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                if s.get("preconditions"):
+                    st.markdown("**Before you start**")
+                    for p in s["preconditions"]:
+                        st.markdown(f"- {p}")
+                    st.write("")
+
+                steps = s.get("steps", [])
+                if steps:
+                    st.markdown("**Test Steps**")
+                    for i, step in enumerate(steps, 1):
+                        st.markdown(f"{i}. {step}")
+                    st.write("")
+
+                expected = s.get("expected_result", "")
+                if expected:
+                    st.markdown(
+                        f'<div style="background:#eafaf1;border-left:4px solid #27ae60;'
+                        f'padding:10px 14px;border-radius:4px;color:#000;">'
+                        f'<strong>What you should see</strong><br/>{expected}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+    with st.expander(f"Gherkin Test Cases ({len(result.get('gherkin_test_cases', []))})", expanded=False):
         for g in result.get("gherkin_test_cases", []):
             tags = " ".join(g.get("tags", []))
             given = "\n".join(f"  {line}" for line in g.get("given", []))
@@ -251,31 +480,84 @@ def _render_results(result: dict):
             then  = "\n".join(f"  {line}" for line in g.get("then", []))
             st.code(f"{tags}\nScenario: {g.get('scenario_title', '')}\n{given}\n{when}\n{then}", language="gherkin")
 
-    with st.expander(f"SECTION 8: Regression Suite ({len(result.get('regression_suite', []))})", expanded=False):
-        regression = result.get("regression_suite", [])
-        if regression:
-            must = [r for r in regression if r.get("priority") == "MUST-RUN"]
-            should = [r for r in regression if r.get("priority") == "SHOULD-RUN"]
-            st.markdown(f"**MUST-RUN:** {len(must)} | **SHOULD-RUN:** {len(should)}")
-            for r in regression:
-                prio_tag = "[MUST-RUN]" if r.get("priority") == "MUST-RUN" else "[SHOULD-RUN]"
-                st.markdown(f"{prio_tag} `{r.get('test_case_id', '')}` — {r.get('test_case_name', '')}")
-                st.caption(f"Reason: {r.get('reason', '')}")
-        else:
-            st.info("No existing test cases in graph. Ingest test cases to see regression recommendations.")
+    reg_suite = result.get("regression_suite", [])
+    reg_gherkin = result.get("regression_gherkin", [])
+    with st.expander(
+        f"Regression Suite — {len(reg_suite)} TCs to re-run + {len(reg_gherkin)} new interaction scenarios",
+        expanded=False,
+    ):
+        must = [r for r in reg_suite if r.get("priority") == "MUST-RUN"]
+        should = [r for r in reg_suite if r.get("priority") == "SHOULD-RUN"]
 
-    with st.expander(f"SECTION 9: Test Cases to UPDATE ({len(result.get('test_cases_to_update', []))})", expanded=False):
+        # ── Part A: Existing TCs ───────────────────────────────────────────
+        st.markdown("#### Part A — Existing Test Cases to Re-run")
+        if reg_suite:
+            st.markdown(
+                f"<span style='background:#922b21;color:white;padding:2px 8px;border-radius:4px;font-size:12px'>MUST-RUN {len(must)}</span> &nbsp;"
+                f"<span style='background:#7d6608;color:white;padding:2px 8px;border-radius:4px;font-size:12px'>SHOULD-RUN {len(should)}</span>",
+                unsafe_allow_html=True,
+            )
+            st.write("")
+            for r in reg_suite:
+                is_must = r.get("priority") == "MUST-RUN"
+                trace = r.get("trace", {})
+                trigger = trace.get("trigger", "IN SCOPE")
+                why = trace.get("why", r.get("reason", ""))
+                what = trace.get("what_to_verify", "Re-run and confirm all assertions pass")
+
+                badge_color = "#922b21" if is_must else "#7d6608"
+                badge_label = "MUST-RUN" if is_must else "SHOULD-RUN"
+                trigger_color = {
+                    "MODULE MATCH": "#1a5276", "FEATURE MATCH": "#1a5276",
+                    "BUG REGRESSION": "#6e2f17", "API DEPENDENCY": "#4a235a",
+                    "EVENT DEPENDENCY": "#4a235a", "TRANSITIVE": "#1e5631",
+                    "SECURITY": "#7b241c", "SMOKE": "#145a32",
+                    "NEGATIVE": "#6e2f17", "CONCURRENCY": "#784212",
+                    "IDEMPOTENCY": "#2e4057",
+                }.get(trigger, "#2c3e50")
+
+                st.markdown(
+                    f"<span style='background:{badge_color};color:white;padding:1px 7px;border-radius:3px;font-size:11px;font-weight:bold'>{badge_label}</span> "
+                    f"<span style='background:{trigger_color};color:white;padding:1px 7px;border-radius:3px;font-size:11px'>{trigger}</span> "
+                    f"`{r.get('test_case_id', '')}` — **{r.get('test_case_name', '')}**",
+                    unsafe_allow_html=True,
+                )
+                st.caption(f"WHY: {why}")
+                st.caption(f"VERIFY: {what}")
+                if r.get("needs_update") and r.get("update_reason"):
+                    st.warning(f"UPDATE NEEDED: {r.get('update_reason')}", icon="✏️")
+                st.write("")
+        else:
+            st.info("No existing test cases in graph. Ingest test cases to populate this section.")
+
+        # ── Part B: New Regression Gherkin ────────────────────────────────
+        st.divider()
+        st.markdown("#### Part B — New Regression Gherkin: Feature Interaction Scenarios")
+        if reg_gherkin:
+            for g in reg_gherkin:
+                tags = " ".join(g.get("tags", ["@regression"]))
+                given = "\n".join(f"  {line}" for line in g.get("given", []))
+                when  = "\n".join(f"  {line}" for line in g.get("when", []))
+                then  = "\n".join(f"  {line}" for line in g.get("then", []))
+                st.code(
+                    f"{tags}\nScenario: {g.get('scenario_title', '')}\n{given}\n{when}\n{then}",
+                    language="gherkin",
+                )
+        else:
+            st.info("Regression Gherkin scenarios will appear here after analysis.")
+
+    with st.expander(f"Test Cases to Update ({len(result.get('test_cases_to_update', []))})", expanded=False):
         for u in result.get("test_cases_to_update", []):
             st.markdown(f"`{u.get('test_case_id', '')}` — {u.get('test_case_name', '')}")
             st.caption(f"Update reason: {u.get('update_reason', '')}")
 
-    with st.expander(f"SECTION 10: Missing Coverage ({len(result.get('missing_coverage', []))})", expanded=True):
+    with st.expander(f"Missing Coverage ({len(result.get('missing_coverage', []))})", expanded=True):
         for gap in result.get("missing_coverage", []):
             gap_type = gap.get("gap_type", "").replace("_", " ").upper()
             st.markdown(f"[{gap_type}] **{gap.get('area', '')}** — {gap.get('description', '')}")
             st.caption(f"{gap.get('recommendation', '')}")
 
-    with st.expander(f"SECTION 11: API + Event Validation ({len(result.get('api_event_validation', []))})", expanded=False):
+    with st.expander(f"API + Event Validation ({len(result.get('api_event_validation', []))})", expanded=False):
         for api in result.get("api_event_validation", []):
             st.markdown(f"**`{api.get('method', '')} {api.get('endpoint', '')}`**")
             for v in api.get("validations", []):
@@ -284,29 +566,6 @@ def _render_results(result: dict):
                 st.caption(f"Events published: {', '.join(api['event_triggers'])}")
             st.divider()
 
-    st.divider()
-    col_exp1, col_exp2 = st.columns(2)
-    with col_exp1:
-        st.download_button(
-            "Export Full Report (JSON)",
-            data=json.dumps(result, indent=2, default=str),
-            file_name=f"qa_report_{result.get('generated_at', 'report')[:10]}.json",
-            mime="application/json",
-        )
-    with col_exp2:
-        md_lines = [
-            f"# QA Intelligence Report\n\n**Feature:** {result.get('feature_name', 'Unknown')}\n\n",
-            f"**Risk:** {result.get('overall_risk')} | **Generated:** {result.get('generated_at', '')}\n\n",
-            f"## Feature Understanding\n{result.get('feature_understanding', '')}\n\n## Risk Areas\n",
-        ]
-        for r in result.get("risk_areas", []):
-            md_lines.append(f"- **{r.get('priority')}** {r.get('feature', r.get('module', ''))} (score: {r.get('risk_score', 0):.2f})\n")
-        st.download_button(
-            "Export Report (Markdown)",
-            data="".join(md_lines),
-            file_name="qa_report.md",
-            mime="text/markdown",
-        )
 
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
@@ -315,7 +574,66 @@ with st.sidebar:
     st.caption("Three-Brain QA Architecture")
     st.divider()
 
+    # DeepInfra pricing per 1M tokens (input_$/M, output_$/M)
+    _PRICING = {
+        "openai/gpt-oss-120b-Turbo":               (0.80, 2.40),
+        "meta-llama/Meta-Llama-3.1-8B-Instruct":   (0.06, 0.06),
+        "meta-llama/Meta-Llama-3.1-70B-Instruct":  (0.52, 0.75),
+        "meta-llama/Meta-Llama-3.1-405B-Instruct": (2.70, 2.70),
+        "mistralai/Mixtral-8x7B-Instruct-v0.1":    (0.27, 0.27),
+        "deepseek-ai/DeepSeek-R1":                 (0.55, 2.19),
+        "Qwen/Qwen2.5-72B-Instruct":               (0.35, 0.40),
+    }
+
+    llm_price = _PRICING.get(settings.LLM_MODEL)
+
     st.success(f"Model: {settings.LLM_MODEL}")
+
+    # Live session usage + cost (populated after pipeline runs via st.session_state)
+    usage = st.session_state["token_usage"]
+    inp_tok = usage["input_tokens"]
+    out_tok = usage["output_tokens"]
+
+    if llm_price and (inp_tok or out_tok):
+        inp_cost  = inp_tok  / 1_000_000 * llm_price[0]
+        out_cost  = out_tok  / 1_000_000 * llm_price[1]
+        total_cost = inp_cost + out_cost
+        st.markdown(
+            f"""
+<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px;margin-top:4px;">
+  <div style="font-size:0.75rem;color:#94a3b8;margin-bottom:6px;">Session usage · DeepInfra</div>
+  <table style="width:100%;font-size:0.82rem;border-collapse:collapse;">
+    <tr>
+      <td style="color:#94a3b8;padding:2px 0;">Input</td>
+      <td style="text-align:right;color:#e2e8f0;">{inp_tok:,} tok</td>
+      <td style="text-align:right;color:#38bdf8;padding-left:8px;">${inp_cost:.4f}</td>
+    </tr>
+    <tr>
+      <td style="color:#94a3b8;padding:2px 0;">Output</td>
+      <td style="text-align:right;color:#e2e8f0;">{out_tok:,} tok</td>
+      <td style="text-align:right;color:#38bdf8;padding-left:8px;">${out_cost:.4f}</td>
+    </tr>
+    <tr style="border-top:1px solid #334155;">
+      <td style="color:#f1f5f9;font-weight:bold;padding-top:4px;">Total</td>
+      <td style="text-align:right;color:#e2e8f0;padding-top:4px;">{inp_tok+out_tok:,} tok</td>
+      <td style="text-align:right;color:#4ade80;font-weight:bold;padding-left:8px;padding-top:4px;">${total_cost:.4f}</td>
+    </tr>
+  </table>
+  <div style="font-size:0.7rem;color:#475569;margin-top:6px;">
+    Rates: ${llm_price[0]:.2f} / ${llm_price[1]:.2f} per 1M in/out tokens
+  </div>
+</div>""",
+            unsafe_allow_html=True,
+        )
+    elif llm_price:
+        st.caption(f"Rates: ${llm_price[0]:.2f} / ${llm_price[1]:.2f} per 1M in/out tokens · no calls yet")
+    else:
+        st.caption("Pricing not listed for this model")
+
+    if (inp_tok or out_tok) and st.button("Reset usage", use_container_width=True, type="secondary"):
+        llm_client.reset_usage()
+        st.session_state["token_usage"] = {"input_tokens": 0, "output_tokens": 0}
+        st.rerun()
 
     st.divider()
 
@@ -334,12 +652,21 @@ with st.sidebar:
     except Exception:
         st.warning("Cannot fetch KB status")
 
+    if st.button("Clear KB", type="secondary", use_container_width=True):
+        try:
+            vector_store.clear()
+            get_graph().clear()
+            st.success("Knowledge Base cleared.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Clear failed: {e}")
+
     st.divider()
     st.caption("QA Intelligence System v1.0")
 
 
 # ─── Main Tabs ────────────────────────────────────────────────────────────────
-tab_ingest, tab_analyze, tab_graph = st.tabs(["Ingest", "Analyze & Generate", "Knowledge Graph"])
+tab_ingest, tab_analyze = st.tabs(["Ingest", "Analyze & Generate"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -476,8 +803,11 @@ with tab_analyze:
                     progress_bar.progress(100, "Complete!")
 
                     st.session_state["qa_result"] = result
+                    # Snapshot token usage into session state so the sidebar shows
+                    # real counts on the rerun (sidebar renders before pipeline runs)
+                    st.session_state["token_usage"] = llm_client.get_usage()
                     complexity = result.get("complexity_level", "moderate").upper()
-                    st.success(
+                    st.session_state["analysis_summary"] = (
                         f"Analysis complete! "
                         f"Module: **{result.get('detected_module', '?')}** | "
                         f"Priority: **{result.get('detected_priority', '?')}** | "
@@ -486,8 +816,12 @@ with tab_analyze:
                         f"Scenarios: **{result.get('total_scenarios', 0)}** | "
                         f"Warnings: **{len(result.get('heads_up_warnings', []))}**"
                     )
+                    st.rerun()
                 except Exception as e:
                     st.error(str(e))
+
+    if "analysis_summary" in st.session_state:
+        st.success(st.session_state["analysis_summary"])
 
     if "qa_result" in st.session_state:
         _render_results(st.session_state["qa_result"])
@@ -496,30 +830,3 @@ with tab_analyze:
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 3: KNOWLEDGE GRAPH
 # ═══════════════════════════════════════════════════════════════════════════════
-with tab_graph:
-    st.header("Knowledge Graph Explorer")
-
-    try:
-        gq = GraphQueryEngine(get_graph())
-        stats = gq.get_graph_stats()
-        cols = st.columns(6)
-        labels = ["module", "feature", "api", "bug", "testcase", "event"]
-        for i, label in enumerate(labels):
-            count = stats.get(f"{label}_count", 0)
-            cols[i].metric(f"{label.title()}s", count)
-
-        st.metric("Total Nodes", stats.get("total_nodes", 0))
-        st.metric("Total Relationships", stats.get("total_relationships", 0))
-    except Exception as e:
-        st.warning(f"Graph stats unavailable: {e}")
-
-    st.divider()
-    st.subheader("Graph Visualisation")
-    st.info(
-        "Full graph visualisation requires Neo4j Browser or a graph viz library. "
-        "Run Neo4j Browser at http://localhost:7474 to explore the full graph.\n\n"
-        "**Quick query examples:**\n"
-        "- `MATCH (n) RETURN n LIMIT 50`\n"
-        "- `MATCH (b:Bug)-[:FOUND_IN]->(m:Module) RETURN b, m`\n"
-        "- `MATCH p=shortestPath((a:Feature)-[*]-(b:Module)) RETURN p`"
-    )

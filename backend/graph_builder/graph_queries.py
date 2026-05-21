@@ -20,8 +20,14 @@ class GraphQueryEngine:
     def get_module(self, name: str) -> Optional[Dict[str, Any]]:
         modules = self._g.find_nodes("Module")
         name_lower = name.lower()
+        # Exact match first
         for m in modules:
             if m.get("name", "").lower() == name_lower or m.get("id", "").lower() == name_lower:
+                return m
+        # Substring match (e.g. "Checkout" matches "Checkout Module")
+        for m in modules:
+            m_name = m.get("name", "").lower()
+            if name_lower in m_name or m_name in name_lower:
                 return m
         return None
 
@@ -134,7 +140,8 @@ class GraphQueryEngine:
 
     # ─── Impact analysis ─────────────────────────────────────────────────────
 
-    def full_impact_analysis(self, feature_name: str) -> Dict[str, Any]:
+    def full_impact_analysis(self, feature_name: str,
+                              module_name: str = "") -> Dict[str, Any]:
         """Entry point for the orchestrator – returns everything connected to a feature."""
         feature = self.find_feature(feature_name)
         result: Dict[str, Any] = {
@@ -150,12 +157,20 @@ class GraphQueryEngine:
         }
 
         if not feature:
-            # Try module-level if feature not found
-            all_modules = self.get_all_modules()
-            result["modules"] = all_modules[:5]
-            result["bugs"] = self.get_all_bugs()[:10]
-            result["events"] = self.get_all_events()[:10]
-            result["apis"] = self.get_all_apis()[:10]
+            # Fall back to the LLM-detected module if provided
+            module_node = self.get_module(module_name) if module_name else None
+            if module_node:
+                mid = module_node.get("id", "")
+                result["modules"] = [module_node]
+                result["dependent_modules"] = self.get_impacted_modules(mid)
+                result["bugs"] = self.get_bugs_for_module(mid)
+                result["apis"] = self.get_apis_for_module(mid)
+                result["events"] = self.get_all_events()[:10]
+            else:
+                # Last resort: return everything from the graph
+                result["bugs"] = self.get_all_bugs()[:10]
+                result["events"] = self.get_all_events()[:10]
+                result["apis"] = self.get_all_apis()[:10]
             return result
 
         fid = feature.get("id", "")

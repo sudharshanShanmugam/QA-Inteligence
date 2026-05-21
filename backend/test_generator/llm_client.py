@@ -7,6 +7,7 @@ It formats intelligence, it does NOT invent intelligence.
 
 import json
 import re
+import threading
 from typing import Any, Dict, Generator, List, Optional
 import structlog
 
@@ -14,11 +15,134 @@ from config import settings
 
 log = structlog.get_logger()
 
+# Limits concurrent LLM calls globally — prevents API timeouts when many files
+# are ingested in parallel (e.g. 18 files × 2 LLM calls each = 36 requests).
+_llm_semaphore = threading.Semaphore(3)
+
+# Patterns that indicate the LLM returned a template placeholder instead of real content.
+# These are leaked prompt instructions, not real test data.
+_PLACEHOLDER_RE = re.compile(
+    r'\[(?:exact\s+)?(?:field|screen|button|role|user|value|module|endpoint|error|message'
+    r'|name|step|precondition|action|outcome|description|test)[^\]]{0,60}\]',
+    re.IGNORECASE,
+)
+# Strings that flag a generic/boilerplate sentence with no grounding
+_GENERIC_PHRASES = (
+    "navigate to the form",
+    "enter a value",
+    "submit the operation",
+    "perform the action",
+    "the expected outcome",
+    "the system responds correctly",
+    "a valid input",
+    "an invalid input",
+    "the feature is working",
+)
+
 
 class LLMClient:
     def __init__(self):
         self._llm = None
         self._streaming_llm = None
+        self._usage_lock = threading.Lock()
+        self._input_tokens: int = 0
+        self._output_tokens: int = 0
+
+    # ── Token tracking ─────────────────────────────────────────────────────────
+
+    def _record_usage(self, result: Any, prompt: str = "") -> None:
+        """Extract token counts from an invoke() response and accumulate them.
+
+        Tries three sources in order:
+          1. result.usage_metadata (LangChain standard TypedDict)
+          2. result.response_metadata['token_usage'] (OpenAI-style raw dict)
+          3. Character-length estimate (4 chars ≈ 1 token) as guaranteed fallback
+        """
+        inp = out = 0
+
+        # Source 1 — LangChain UsageMetadata
+        usage = getattr(result, "usage_metadata", None)
+        if usage:
+            inp = int(getattr(usage, "input_tokens", 0) or (usage.get("input_tokens", 0) if isinstance(usage, dict) else 0))
+            out = int(getattr(usage, "output_tokens", 0) or (usage.get("output_tokens", 0) if isinstance(usage, dict) else 0))
+
+        # Source 2 — OpenAI-style response_metadata
+        if not inp and not out:
+            meta = getattr(result, "response_metadata", {}) or {}
+            tu = meta.get("token_usage") or {}
+            inp = int(tu.get("prompt_tokens", 0))
+            out = int(tu.get("completion_tokens", 0))
+
+        # Source 3 — character-length estimate (always non-zero after a real call)
+        if not inp:
+            inp = max(1, len(prompt) // 4)
+        if not out:
+            content = getattr(result, "content", "") or ""
+            out = max(1, len(content) // 4)
+
+        with self._usage_lock:
+            self._input_tokens += inp
+            self._output_tokens += out
+
+    def get_usage(self) -> dict:
+        """Return a snapshot of accumulated token usage."""
+        with self._usage_lock:
+            return {"input_tokens": self._input_tokens, "output_tokens": self._output_tokens}
+
+    def reset_usage(self) -> None:
+        with self._usage_lock:
+            self._input_tokens = 0
+            self._output_tokens = 0
+
+    # ── Anti-hallucination helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        """Strip placeholder patterns left by the LLM echoing prompt templates."""
+        return _PLACEHOLDER_RE.sub("", text).strip()
+
+    @staticmethod
+    def _is_generic(text: str) -> bool:
+        """Return True if the text contains boilerplate/generic filler, not real content."""
+        lower = text.lower()
+        return any(phrase in lower for phrase in _GENERIC_PHRASES)
+
+    @staticmethod
+    def _sanitize_scenarios(scenarios: List[Dict]) -> List[Dict]:
+        """Drop or trim scenarios that are mostly template placeholders or generic filler."""
+        clean = []
+        for s in scenarios:
+            title = LLMClient._clean_text(s.get("title", ""))
+            if not title or LLMClient._is_generic(title):
+                log.warning("hallucination_scenario_dropped", title=s.get("title", ""))
+                continue
+            s["title"] = title
+            s["description"] = LLMClient._clean_text(s.get("description", s.get("title", "")))
+            s["expected_result"] = LLMClient._clean_text(s.get("expected_result", ""))
+            s["steps"] = [
+                LLMClient._clean_text(step) for step in s.get("steps", [])
+                if step and not LLMClient._is_generic(step)
+            ]
+            clean.append(s)
+        return clean
+
+    @staticmethod
+    def _validate_risk_reasons(reasons: List[str], known_bug_ids: List[str]) -> List[str]:
+        """Remove reason strings that cite specific bug IDs not present in the known list."""
+        if not known_bug_ids:
+            return reasons
+        known_lower = {b.lower() for b in known_bug_ids}
+        clean = []
+        for r in reasons:
+            # If the reason mentions a BUG-xxx style ID, verify it's in the known list
+            cited = re.findall(r'\bBUG[-_]\w+\b', r, re.IGNORECASE)
+            if cited and not any(c.lower() in known_lower for c in cited):
+                log.warning("hallucinated_bug_id_stripped", reason=r, cited=cited)
+                continue
+            clean.append(r)
+        return clean or reasons  # never return empty — keep originals if all stripped
+
+    # ── LLM helpers ───────────────────────────────────────────────────────────
 
     def _get_llm(self, temperature: float = 0):
         from langchain_openai import ChatOpenAI
@@ -29,15 +153,17 @@ class LLMClient:
             temperature=temperature,
             seed=42,
             timeout=60,
-            max_retries=1,
+            max_retries=0,  # no internal SDK retry; generate() handles its own retry logic
         )
 
-    def generate(self, prompt: str, temperature: float = 0, max_retries: int = 2) -> str:
+    def generate(self, prompt: str, temperature: float = 0, max_retries: int = 0) -> str:
         """Generate text from a prompt. Returns raw string."""
         llm = self._get_llm(temperature)
         for attempt in range(max_retries + 1):
             try:
-                result = llm.invoke(prompt)
+                with _llm_semaphore:
+                    result = llm.invoke(prompt)
+                self._record_usage(result, prompt)
                 return result.content if hasattr(result, "content") else str(result)
             except Exception as e:
                 log.warning("llm_generation_failed", attempt=attempt, error=str(e))
@@ -50,14 +176,22 @@ class LLMClient:
         return self._parse_json(raw, fallback)
 
     def stream(self, prompt: str, temperature: float = 0) -> Generator[str, None, None]:
-        """Stream tokens from the LLM."""
+        """Stream tokens from the LLM. Estimates usage at ~4 chars per token."""
         llm = self._get_llm(temperature)
+        output_chars = 0
         try:
             for chunk in llm.stream(prompt):
-                yield chunk.content if hasattr(chunk, "content") else str(chunk)
+                text = chunk.content if hasattr(chunk, "content") else str(chunk)
+                output_chars += len(text)
+                yield text
         except Exception as e:
             log.warning("llm_stream_failed", error=str(e))
             yield f"[Stream error: {str(e)}]"
+        finally:
+            # Estimate tokens: input from prompt length, output from streamed chars
+            with self._usage_lock:
+                self._input_tokens += max(1, len(prompt) // 4)
+                self._output_tokens += max(0, output_chars // 4)
 
     def generate_feature_understanding(
         self,
@@ -70,15 +204,15 @@ class LLMClient:
     ) -> str:
         from test_generator.prompt_templates import FEATURE_UNDERSTANDING_PROMPT
         prompt = FEATURE_UNDERSTANDING_PROMPT.format(
-            user_story=user_story[:500],
-            rag_context=rag_context[:1500],
+            user_story=user_story[:800],
+            rag_context=rag_context[:4000],
             module_name=module_name or "Unknown",
             apis=", ".join(apis[:5]) or "None identified",
             events=", ".join(events[:5]) or "None identified",
             business_rules=", ".join(str(r) for r in business_rules[:5]) or "None identified",
         )
         result = self.generate(prompt, temperature=0)
-        return result or "Feature understanding not available – insufficient context in knowledge base."
+        return result or "Feature understanding not available — upload BRD, SRS, or user story documents in the Ingest tab to enable full analysis."
 
     def generate_gherkin(
         self,
@@ -109,27 +243,125 @@ class LLMClient:
         raw = self.generate(prompt, temperature=0)
         return self._parse_gherkin(raw, scenarios[:gherkin_limit])
 
+    def extract_pairwise_parameters(
+        self,
+        user_story: str,
+        rag_context: str,
+        feature_name: str,
+    ) -> Dict[str, List[Any]]:
+        """Extract real testable parameter combinations from RAG document content."""
+        from test_generator.prompt_templates import PAIRWISE_PARAMS_PROMPT
+
+        prompt = PAIRWISE_PARAMS_PROMPT.format(
+            user_story=user_story[:600],
+            rag_context=rag_context[:4000],
+            feature_name=feature_name,
+        )
+        result = self.generate_json(prompt, fallback={})
+        if not isinstance(result, dict):
+            return {}
+        # Keep only params with at least 2 distinct real values
+        return {
+            k: list(dict.fromkeys(str(v) for v in vals))
+            for k, vals in result.items()
+            if isinstance(vals, list) and len(vals) >= 2
+        }
+
+    def generate_functional_scenarios(
+        self,
+        user_story: str,
+        rag_context: str,
+        feature_name: str,
+        risk_areas: List[Dict[str, Any]],
+        scenario_count: int = 12,
+        kb_sparse: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Generate structured functional test scenarios grounded in RAG-retrieved document content."""
+        from test_generator.prompt_templates import FUNCTIONAL_SCENARIOS_PROMPT, SPARSE_KB_ADDENDUM
+
+        risk_summary = "; ".join(
+            f"{r.get('priority','?')} — {r.get('feature', r.get('module','?'))}: "
+            + ", ".join(r.get("reasons", [])[:2])
+            for r in risk_areas[:3]
+        ) or "No specific risk areas identified."
+
+        # When KB is sparse, cap at 5 scenarios and append conservative addendum
+        if kb_sparse:
+            scenario_count = min(scenario_count, 5)
+            extra = SPARSE_KB_ADDENDUM
+        else:
+            extra = ""
+
+        prompt = FUNCTIONAL_SCENARIOS_PROMPT.format(
+            user_story=user_story[:800],
+            rag_context=rag_context[:5000],
+            feature_name=feature_name,
+            risk_areas=risk_summary,
+            scenario_count=scenario_count,
+        ) + extra
+
+        raw = self.generate_json(prompt, fallback=[])
+        if not isinstance(raw, list):
+            return []
+        result = []
+        for i, s in enumerate(raw):
+            if not isinstance(s, dict):
+                continue
+            result.append({
+                "id": s.get("id", f"TC-FUNC-{i+1:03d}"),
+                "type": s.get("type", "functional"),
+                "scenario_type": s.get("scenario_type", "functional"),
+                "title": self._clean_text(s.get("title", "")),
+                "description": self._clean_text(s.get("description", s.get("title", ""))),
+                "preconditions": [self._clean_text(p) for p in s.get("preconditions", []) if p],
+                "steps": [self._clean_text(st) for st in s.get("steps", []) if st],
+                "expected_result": self._clean_text(s.get("expected_result", "")),
+                "risk_level": s.get("risk_level", "medium"),
+                "traceability": self._clean_text(
+                    s.get("traceability", "Derived from user story — upload BRD/SRS for KB-grounded traceability")
+                ),
+                "kb_grounded": not kb_sparse,
+            })
+        return self._sanitize_scenarios(result)
+
     def generate_edge_cases(
         self,
         feature_name: str,
         bug_context: str,
-        bva_results: List[Dict],
-        ep_results: List[Dict],
+        rag_context: str,
         state_machine: Optional[Dict],
         edge_count: int = 8,
+        kb_sparse: bool = False,
     ) -> List[Dict[str, Any]]:
-        from test_generator.prompt_templates import EDGE_CASE_PROMPT
+        from test_generator.prompt_templates import EDGE_CASE_PROMPT, SPARSE_KB_ADDENDUM
+
+        if kb_sparse:
+            edge_count = min(edge_count, 3)
 
         prompt = EDGE_CASE_PROMPT.format(
             feature_name=feature_name,
             bug_context=bug_context[:800],
-            bva_results=json.dumps(bva_results[:5], default=str),
-            ep_results=json.dumps(ep_results[:5], default=str),
+            rag_context=rag_context[:4000],
             state_machine=json.dumps(state_machine or {}, default=str),
             edge_count=edge_count,
-        )
-        result = self.generate_json(prompt, fallback=[])
-        return result if isinstance(result, list) else []
+        ) + (SPARSE_KB_ADDENDUM if kb_sparse else "")
+
+        raw = self.generate_json(prompt, fallback=[])
+        if not isinstance(raw, list):
+            return []
+        # Strip placeholder text from condition / expected fields
+        cleaned = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            item["title"] = self._clean_text(item.get("title", ""))
+            item["condition"] = self._clean_text(item.get("condition", ""))
+            item["expected"] = self._clean_text(item.get("expected", ""))
+            if item["title"] and not self._is_generic(item["title"]):
+                cleaned.append(item)
+            else:
+                log.warning("hallucination_edge_case_dropped", title=item.get("title", ""))
+        return cleaned
 
     def generate_signoff_checklist(
         self,
@@ -192,38 +424,48 @@ class LLMClient:
         states_summary = ", ".join(s.get("name", "?") for s in states[:6]) or "None"
 
         prompt = (
-            "You are a senior QA architect with 20+ years of experience in risk-based testing.\n"
-            "Analyze the feature below and reason about ALL risk areas like an expert — consider:\n"
-            "- Past bug patterns and their severity\n"
-            "- Business criticality and financial impact\n"
-            "- Integration complexity (APIs, events, DB)\n"
-            "- State machine complexity\n"
-            "- Security, concurrency, and data integrity risks\n"
-            "- What could go wrong in production\n\n"
+            "You are a Senior QA Architect with 20+ years of risk-based testing experience.\n"
+            "Assess the risk areas for the feature below using ONLY the data provided.\n"
+            "Do NOT invent bugs, APIs, or modules not listed in the input.\n\n"
+            "═══ INPUT DATA ═══\n\n"
             f"Feature: {feature_name}\n"
             f"Module: {module_name}\n"
             f"Detected Priority: {priority}\n\n"
             f"User Story:\n{user_story[:600]}\n\n"
-            f"Past Bugs (from knowledge base):\n{bugs_summary}\n\n"
+            f"Historical Bugs (from knowledge base):\n{bugs_summary}\n\n"
             f"Modules involved: {modules_summary}\n"
             f"APIs involved: {apis_summary}\n"
             f"Events involved: {events_summary}\n"
             f"States involved: {states_summary}\n\n"
-            "Return a JSON array of risk areas — one entry per distinct risk area (max 6).\n"
-            "Each entry must have:\n"
-            '- "feature": the feature or area name\n'
-            '- "module": the module name\n'
-            '- "risk_score": float 0.0–1.0 (P1≥0.75, P2≥0.50, P3≥0.25, P4<0.25)\n'
-            '- "priority": "P1" | "P2" | "P3" | "P4"\n'
-            '- "reasons": list of 2–4 specific reason strings explaining the risk\n'
-            '- "past_bug_count": integer count of related past bugs\n\n'
-            "Sort by risk_score descending. Respond with JSON array only."
+            "═══ RISK SCORING GUIDE ═══\n\n"
+            "Score each risk area on these dimensions:\n"
+            "- Past bugs: each historical bug in this area adds 0.10 to score\n"
+            "- Financial/data sensitivity: payment, auth, personal data → +0.20\n"
+            "- Integration complexity: 3+ APIs or events → +0.15\n"
+            "- State machine complexity: 4+ states or invalid transitions → +0.10\n"
+            "- Security surface: unauthenticated endpoints, user input → +0.15\n"
+            "P1 ≥ 0.75 | P2 ≥ 0.50 | P3 ≥ 0.25 | P4 < 0.25\n\n"
+            "═══ OUTPUT FORMAT ═══\n\n"
+            "Return a JSON array — one object per distinct risk area (max 6), sorted by risk_score descending.\n"
+            "Each object must have exactly these fields:\n"
+            '  "feature": "the specific sub-feature or area at risk (not just the feature name)"\n'
+            '  "module": "the module name from the input"\n'
+            '  "risk_score": 0.0–1.0 float derived from the scoring guide above\n'
+            '  "priority": "P1" | "P2" | "P3" | "P4"\n'
+            '  "reasons": ["specific reason 1 citing actual data", "specific reason 2", ...] (2–4 items)\n'
+            '  "past_bug_count": integer — count of bugs from the Historical Bugs list that apply\n\n'
+            "Example reasons (be this specific):\n"
+            '  "3 past bugs in payment validation — BUG-12, BUG-45, BUG-67"\n'
+            '  "POST /api/checkout has no auth check in current spec"\n'
+            '  "COUPON_APPLIED → EXPIRED transition not handled in state machine"\n\n'
+            "Return valid JSON array only — no markdown fences, no explanation."
         )
 
         result = self.generate_json(prompt, fallback=[])
         if not isinstance(result, list):
             return self._fallback_risk(feature_name, module_name, bugs, priority)
 
+        known_bug_ids = [b.get("id", b.get("title", "")) for b in bugs]
         valid = []
         for item in result:
             if not isinstance(item, dict):
@@ -234,7 +476,10 @@ class LLMClient:
             item.setdefault("priority", self._risk_label(score))
             item.setdefault("feature", feature_name)
             item.setdefault("module", module_name)
-            item.setdefault("reasons", ["LLM-assessed risk"])
+            # Strip reasons that cite specific bug IDs not present in the input list
+            item["reasons"] = self._validate_risk_reasons(
+                item.get("reasons", ["LLM-assessed risk"]), known_bug_ids
+            )
             item.setdefault("past_bug_count", 0)
             valid.append(item)
 
@@ -268,14 +513,30 @@ class LLMClient:
         Returns: {"module": str, "priority": "low|medium|high|critical", "risk_level": "low|medium|high|critical"}
         """
         prompt = (
-            "You are a senior QA analyst. Read the user story below and extract three things.\n\n"
+            "You are a Senior QA Analyst. Read the user story below and classify it.\n\n"
             f"User Story:\n{user_story}\n\n"
+            "Answer these three classification questions:\n\n"
+            "1. MODULE — which application module does this belong to?\n"
+            "   Choose the single best match from: Checkout, Authentication, Payments, Cart, "
+            "User Management, Search, Notifications, Reporting, Inventory, Shipping, "
+            "Document Management, Learning, Certification, Dashboard, Core\n"
+            "   If none match well, infer the closest one from the story context.\n\n"
+            "2. PRIORITY — how urgent is this to test? Use these criteria:\n"
+            "   critical = financial transactions, authentication, data loss risk\n"
+            "   high     = core user-facing workflows, regulatory compliance\n"
+            "   medium   = standard features with moderate business impact\n"
+            "   low      = cosmetic, informational, or rarely-used features\n\n"
+            "3. RISK LEVEL — how likely is this to fail or cause production issues?\n"
+            "   critical = complex integrations, past bug history, security-sensitive\n"
+            "   high     = multiple system dependencies, real-time processing, state machines\n"
+            "   medium   = single system, standard CRUD, moderate validation\n"
+            "   low      = read-only, no integrations, simple display logic\n\n"
             "Return ONLY this JSON — no markdown, no explanation:\n"
             "{\n"
-            '  "module": "<which application module this belongs to, e.g. Checkout, Auth, Payments, Cart, User Management, Search, Notifications, Reporting, Inventory, Shipping, Core>",\n'
-            '  "priority": "<one of: low | medium | high | critical>",\n'
-            '  "risk_level": "<one of: low | medium | high | critical — based on business impact, data sensitivity, and complexity>",\n'
-            '  "reason": "<one sentence explaining the priority and risk assessment>"\n'
+            '  "module": "<module name>",\n'
+            '  "priority": "low | medium | high | critical",\n'
+            '  "risk_level": "low | medium | high | critical",\n'
+            '  "reason": "<one sentence citing the specific factor that drove priority and risk — name the actual risk, e.g. \'Payment processing with 3 external API calls and past BUG-45 history\'>"\n'
             "}"
         )
         result = self.generate_json(prompt, fallback={
@@ -485,6 +746,38 @@ class LLMClient:
                 })
         log.info("apis_inferred_from_story", count=len(apis))
         return apis
+
+    def generate_regression_gherkin(
+        self,
+        feature_name: str,
+        module_name: str,
+        user_story: str,
+        impacted_modules: List[Dict[str, Any]],
+        regression_suite: List[Dict[str, Any]],
+        scenario_limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        from test_generator.prompt_templates import REGRESSION_GHERKIN_PROMPT
+
+        modules_text = "\n".join(
+            f"- {m.get('name', m.get('id', ''))}: impact_type={m.get('impact_type', 'TRANSITIVE')}"
+            for m in impacted_modules[:8]
+        ) or "None identified"
+
+        entries_text = "\n".join(
+            f"- [{r.get('priority', '')}] {r.get('test_case_name', '')}: {r.get('reason', '')}"
+            for r in regression_suite[:10]
+        ) or "None"
+
+        prompt = REGRESSION_GHERKIN_PROMPT.format(
+            feature_name=feature_name,
+            module_name=module_name,
+            user_story=user_story[:400],
+            impacted_modules=modules_text,
+            regression_entries=entries_text,
+            scenario_limit=scenario_limit,
+        )
+        raw = self.generate(prompt, temperature=0)
+        return self._parse_gherkin(raw, [])
 
     def generate_api_validations(
         self, apis: List[Dict[str, Any]], events: List[Dict[str, Any]]

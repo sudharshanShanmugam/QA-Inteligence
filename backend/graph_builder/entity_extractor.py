@@ -1,12 +1,8 @@
 """
-Entity extraction from raw documents — rule-based only, no LLM call.
+Entity extraction from raw documents — rule-based, instant, no LLM.
 
-Extracts: Module, Feature, API, DBTable, Event, TestCase, Bug, UserJourney,
-          BusinessRule, State — with their properties.
-
-Rule-based extraction is instant and never times out.
-LLM-based inference is deferred to the analysis pipeline (qa_pipeline.py)
-where it has full user-story context.
+Extracts: Module, Feature, API, DBTable, Event, TestCase, Bug,
+          BusinessRule, State — with their properties and relationships.
 """
 
 import re

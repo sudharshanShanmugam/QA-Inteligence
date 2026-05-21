@@ -3,6 +3,7 @@ ChromaDB vector store wrapper.
 Handles collection creation, document upsert, and similarity search.
 """
 
+import threading
 import structlog
 from typing import Any, Dict, List, Optional
 from config import settings
@@ -15,18 +16,21 @@ class VectorStore:
         self._client = None
         self._collection = None
         self._embeddings = None
+        self._lock = threading.Lock()
 
     def _init(self):
         if self._collection is not None:
             return
-        import chromadb
-
-        self._client = chromadb.EphemeralClient()
-        self._collection = self._client.get_or_create_collection(
-            name=settings.CHROMA_COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"},
-        )
-        log.info("chroma_collection_ready", name=settings.CHROMA_COLLECTION_NAME)
+        with self._lock:
+            if self._collection is not None:
+                return
+            import chromadb
+            self._client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIR)
+            self._collection = self._client.get_or_create_collection(
+                name=settings.CHROMA_COLLECTION_NAME,
+                metadata={"hnsw:space": "cosine"},
+            )
+            log.info("chroma_collection_ready", name=settings.CHROMA_COLLECTION_NAME)
 
     def _get_embeddings(self) -> Any:
         if self._embeddings is None:
@@ -129,6 +133,15 @@ class VectorStore:
             return list({m.get("source_id", "") for m in results["metadatas"]})
         except Exception:
             return []
+
+    def clear(self) -> None:
+        self._init()
+        self._client.delete_collection(settings.CHROMA_COLLECTION_NAME)
+        self._collection = self._client.get_or_create_collection(
+            name=settings.CHROMA_COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+        log.info("chroma_collection_cleared")
 
 
 vector_store = VectorStore()

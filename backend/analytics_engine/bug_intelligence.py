@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Tuple
 
 SEVERITY_ORDER = {"blocker": 0, "critical": 1, "p1": 1, "high": 2, "p2": 2, "medium": 3, "p3": 3, "low": 4, "p4": 4, "trivial": 5}
 
-# High-risk root cause keywords mapped to warning templates
+# Root cause keywords → actionable recommendation
 ROOT_CAUSE_PATTERNS = {
     "race condition": "Race condition risk – ensure thread-safety and idempotency for concurrent requests",
     "null pointer": "Null/undefined reference risk – add null checks at all entry points",
@@ -41,6 +41,9 @@ ROOT_CAUSE_PATTERNS = {
     "rollback": "Transaction rollback risk – test partial failure scenarios",
 }
 
+# Minimum score for a bug to be considered relevant (prevents noise from keyword coincidence)
+_MIN_RELEVANCE = 0.20
+
 
 class BugIntelligenceEngine:
     def find_similar_bugs(
@@ -49,23 +52,23 @@ class BugIntelligenceEngine:
         module_name: str,
         story_text: str,
         all_bugs: List[Dict[str, Any]],
-        top_k: int = 10,
+        top_k: int = 5,
     ) -> List[Dict[str, Any]]:
         """
         Score all known bugs by relevance to the current feature.
-        Returns top_k bugs, sorted by relevance × severity.
+        Only returns bugs above the minimum relevance threshold.
         """
         if not all_bugs:
             return []
 
-        scored: List[Tuple[float, Dict[str, Any]]] = []
         story_lower = story_text.lower()
         feat_lower = feature_name.lower()
         mod_lower = module_name.lower() if module_name else ""
 
+        scored: List[Tuple[float, Dict[str, Any]]] = []
         for bug in all_bugs:
             score = self._relevance_score(bug, feat_lower, mod_lower, story_lower)
-            if score > 0:
+            if score >= _MIN_RELEVANCE:
                 scored.append((score, bug))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -76,57 +79,64 @@ class BugIntelligenceEngine:
         similar_bugs: List[Dict[str, Any]],
         story_text: str,
     ) -> List[Dict[str, Any]]:
-        """Convert similar bugs into actionable HEADS-UP warnings."""
+        """
+        Convert similar bugs into actionable HEADS-UP warnings.
+
+        Rules:
+        - One warning per bug (includes root-cause pattern in recommendation when found).
+        - Root-cause pattern warnings only from bugs — no generic story text scanning.
+        - Max 5 warnings total, sorted critical-first.
+        """
         warnings: List[Dict[str, Any]] = []
         used_patterns: set = set()
 
-        # Warnings from similar historical bugs
         for bug in similar_bugs:
             sev = bug.get("severity", "medium").lower()
+            bug_root = (bug.get("root_cause", "") + " " + bug.get("description", "")).lower()
+
+            # Find the single most relevant root-cause pattern for this bug
+            matched_pattern = None
+            for keyword, template in ROOT_CAUSE_PATTERNS.items():
+                if keyword in bug_root and keyword not in used_patterns:
+                    matched_pattern = (keyword, template)
+                    used_patterns.add(keyword)
+                    break
+
+            bug_display  = bug.get("name", bug.get("title", bug.get("id", "UNKNOWN")))
+            root_cause   = bug.get("root_cause", "") or bug.get("description", "")
+            root_cause   = root_cause.strip() or None
+
+            # Split "Risk label – actionable advice" → just the advice sentence
+            pattern_label  = matched_pattern[0].title().replace("_", " ") if matched_pattern else None
+            pattern_advice = None
+            if matched_pattern:
+                parts = matched_pattern[1].split(" – ", 1)
+                pattern_advice = parts[1] if len(parts) == 2 else matched_pattern[1]
+
+            module = (bug.get("module_id") or bug.get("module") or "").strip() or None
+
             warnings.append({
-                "warning": f"Similar bug '{bug.get('title', bug.get('id', 'UNKNOWN'))}' was found in a similar area",
+                "warning": (
+                    f"A past {pattern_label.lower()} issue in a similar area may resurface with this change"
+                    if pattern_label else
+                    "A historically similar bug may affect this feature — review before shipping"
+                ),
                 "similar_bug_id": bug.get("id", ""),
-                "bug_title": bug.get("title", ""),
-                "severity": sev,
-                "module": bug.get("module_id", bug.get("module", "")),
+                "bug_title":    bug_display,
+                "severity":     sev,
+                "module":       module,
+                "pattern":      pattern_label,
+                "pattern_advice": pattern_advice,
+                "root_cause":   root_cause,
                 "recommendation": (
-                    f"Re-verify: {bug.get('root_cause', 'Root cause unknown')}. "
-                    f"Ensure fix did not regress."
+                    "Run focused tests around this area before releasing. "
+                    "Confirm the original fix is still in place and covers the scenario described above."
                 ),
             })
 
-        # Warnings from root cause pattern matching against the story
-        story_lower = story_text.lower()
-        for bug in similar_bugs:
-            root_cause = (bug.get("root_cause", "") + " " + bug.get("description", "")).lower()
-            for keyword, template in ROOT_CAUSE_PATTERNS.items():
-                if keyword in root_cause and keyword not in used_patterns:
-                    used_patterns.add(keyword)
-                    warnings.append({
-                        "warning": f"[ROOT CAUSE PATTERN] '{keyword}' class defect detected in similar feature",
-                        "similar_bug_id": bug.get("id", ""),
-                        "bug_title": bug.get("title", ""),
-                        "severity": bug.get("severity", "medium"),
-                        "module": bug.get("module_id", ""),
-                        "recommendation": template,
-                    })
-
-        # Warnings from story text directly (proactive)
-        for keyword, template in ROOT_CAUSE_PATTERNS.items():
-            if keyword in story_lower and keyword not in used_patterns:
-                used_patterns.add(keyword)
-                warnings.append({
-                    "warning": f"[PROACTIVE] Story mentions '{keyword}' – historically a source of defects",
-                    "similar_bug_id": "",
-                    "bug_title": "",
-                    "severity": "medium",
-                    "module": "",
-                    "recommendation": template,
-                })
-
-        # Sort: critical first
+        # Sort critical/blocker first, cap at 5
         warnings.sort(key=lambda w: SEVERITY_ORDER.get(w["severity"].lower(), 5))
-        return warnings
+        return warnings[:5]
 
     def get_bug_patterns(self, all_bugs: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Aggregate bug statistics for risk calculation."""
@@ -154,32 +164,44 @@ class BugIntelligenceEngine:
 
     # ── Scoring ────────────────────────────────────────────────────────────────
 
+    _STOP_WORDS = {
+        "that", "this", "with", "from", "have", "will", "been", "when",
+        "they", "them", "then", "than", "into", "your", "also", "some",
+        "user", "users", "system", "should", "would", "could", "their",
+        "want", "able", "make", "when", "where", "which", "while",
+    }
+
     def _relevance_score(
         self, bug: Dict[str, Any], feat_lower: str, mod_lower: str, story_lower: str
     ) -> float:
         score = 0.0
-        bug_text = (
-            bug.get("title", "") + " " +
-            bug.get("description", "") + " " +
-            bug.get("feature", bug.get("feature_id", "")) + " " +
-            bug.get("module_id", bug.get("module", ""))
-        ).lower()
 
-        # Module match (strong signal)
+        # Build full bug text — graph nodes use "name" not "title"; root_cause is top-level
+        bug_text = " ".join(filter(None, [
+            bug.get("name", bug.get("title", "")),        # primary identifier
+            bug.get("root_cause", ""),                    # most diagnostic field
+            bug.get("description", ""),
+            bug.get("feature", bug.get("feature_id", "")),
+            bug.get("module_id", bug.get("module", "")),
+            bug.get("source_id", ""),                     # e.g. "checkout_bugs" → module signal
+        ])).lower()
+
+        # Module match — source_id like "checkout_bugs" carries module signal
         if mod_lower and mod_lower in bug_text:
             score += 0.40
 
-        # Feature name match
-        if feat_lower and feat_lower in bug_text:
-            score += 0.30
+        # Feature name keywords match (individual words, not full phrase)
+        feat_words = set(re.findall(r'\b\w{4,}\b', feat_lower)) - self._STOP_WORDS
+        if feat_words and feat_words & set(re.findall(r'\b\w{4,}\b', bug_text)):
+            score += 0.20
 
-        # Keyword overlap between story and bug
-        story_words = set(re.findall(r'\b\w{4,}\b', story_lower))
-        bug_words = set(re.findall(r'\b\w{4,}\b', bug_text))
+        # Meaningful keyword overlap with the story
+        story_words = set(re.findall(r'\b\w{4,}\b', story_lower)) - self._STOP_WORDS
+        bug_words = set(re.findall(r'\b\w{4,}\b', bug_text)) - self._STOP_WORDS
         overlap = len(story_words & bug_words)
-        score += min(0.30, overlap * 0.05)
+        score += min(0.30, overlap * 0.06)
 
-        # Severity boost (higher severity = more important to surface)
+        # Severity boost
         sev = bug.get("severity", "medium").lower()
         sev_boost = {0: 0.10, 1: 0.10, 2: 0.07, 3: 0.04, 4: 0.01, 5: 0.0}
         score += sev_boost.get(SEVERITY_ORDER.get(sev, 3), 0.0)

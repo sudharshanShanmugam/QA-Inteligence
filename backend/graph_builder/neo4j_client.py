@@ -50,6 +50,9 @@ class GraphAdapter(ABC):
     def shortest_path(self, from_id: str, to_id: str) -> List[str]: ...
 
     @abstractmethod
+    def clear(self) -> None: ...
+
+    @abstractmethod
     def close(self) -> None: ...
 
 
@@ -57,11 +60,39 @@ class GraphAdapter(ABC):
 
 
 class NetworkXAdapter(GraphAdapter):
-    """In-process in-memory graph. No disk persistence."""
+    """In-process graph backed by a pickle file for persistence across restarts."""
 
     def __init__(self):
-        self._g: nx.MultiDiGraph = nx.MultiDiGraph()
-        log.info("graph_initialised_in_memory")
+        import os
+        self._path = os.path.abspath(settings.GRAPH_PERSIST_PATH)
+        self._g: nx.MultiDiGraph = self._load()
+        log.info("graph_initialised_in_memory", nodes=self._g.number_of_nodes(),
+                 persisted_to=self._path)
+
+    def _load(self) -> nx.MultiDiGraph:
+        import pickle, os
+        try:
+            with open(self._path, "rb") as f:
+                g = pickle.load(f)
+            log.info("graph_loaded_from_disk", nodes=g.number_of_nodes(),
+                     relationships=g.number_of_edges())
+            return g
+        except FileNotFoundError:
+            return nx.MultiDiGraph()
+        except Exception as e:
+            log.warning("graph_load_failed_starting_fresh", error=str(e))
+            return nx.MultiDiGraph()
+
+    def _save(self) -> None:
+        import pickle, os, tempfile
+        try:
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            tmp = self._path + ".tmp"
+            with open(tmp, "wb") as f:
+                pickle.dump(self._g, f)
+            os.replace(tmp, self._path)   # atomic on POSIX
+        except Exception as e:
+            log.warning("graph_save_failed", error=str(e))
 
     # ── write ────────────────────────────────────────────────────────────────
 
@@ -71,12 +102,14 @@ class NetworkXAdapter(GraphAdapter):
             self._g.nodes[node_id].update(props)
         else:
             self._g.add_node(node_id, **props)
+        self._save()
         return node_id
 
     def upsert_relationship(self, from_id: str, to_id: str, rel_type: str,
                              properties: Dict[str, Any] | None = None) -> None:
         props = properties or {}
         self._g.add_edge(from_id, to_id, rel_type=rel_type, **props)
+        self._save()
 
     # ── read ─────────────────────────────────────────────────────────────────
 
@@ -128,6 +161,16 @@ class NetworkXAdapter(GraphAdapter):
             return nx.shortest_path(self._g, from_id, to_id)
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return []
+
+    def clear(self) -> None:
+        import os
+        self._g = nx.MultiDiGraph()
+        self._save()
+        try:
+            os.remove(self._path)
+        except FileNotFoundError:
+            pass
+        log.info("graph_cleared")
 
     def close(self) -> None:
         pass
@@ -208,6 +251,10 @@ class Neo4jAdapter(GraphAdapter):
         )
         rows = self._run(cypher, from_id=from_id, to_id=to_id)
         return rows[0]["path"] if rows else []
+
+    def clear(self) -> None:
+        self._run("MATCH (n) DETACH DELETE n")
+        log.info("graph_cleared")
 
     def close(self) -> None:
         self._driver.close()
