@@ -13,13 +13,14 @@ log = structlog.get_logger()
 
 
 class RAGRetriever:
-    def retrieve(self, query: str, top_k: int = None) -> Dict[str, Any]:
+    def retrieve(self, query: str, top_k: int = None, store=None) -> Dict[str, Any]:
         """
         Retrieve relevant chunks for a query and organise by document type.
         Returns a structured context dict.
         """
+        _store = store or vector_store
         top_k = top_k or settings.MAX_RETRIEVAL_DOCS
-        hits = vector_store.search(query, top_k=top_k)
+        hits = _store.search(query, top_k=top_k)
 
         context: Dict[str, List[str]] = {
             "brd": [],
@@ -52,16 +53,19 @@ class RAGRetriever:
             "raw_hits": hits,
         }
 
-    def retrieve_bugs(self, query: str, top_k: int = 15) -> List[str]:
-        hits = vector_store.search(query, top_k=top_k, doc_type_filter="bug_report")
+    def retrieve_bugs(self, query: str, top_k: int = 15, store=None) -> List[str]:
+        _store = store or vector_store
+        hits = _store.search(query, top_k=top_k, doc_type_filter="bug_report")
         return [h["text"] for h in hits]
 
-    def retrieve_test_cases(self, query: str, top_k: int = 10) -> List[str]:
-        hits = vector_store.search(query, top_k=top_k, doc_type_filter="test_case")
+    def retrieve_test_cases(self, query: str, top_k: int = 10, store=None) -> List[str]:
+        _store = store or vector_store
+        hits = _store.search(query, top_k=top_k, doc_type_filter="test_case")
         return [h["text"] for h in hits]
 
-    def retrieve_api_contracts(self, query: str, top_k: int = 10) -> List[str]:
-        hits = vector_store.search(query, top_k=top_k, doc_type_filter="api_contract")
+    def retrieve_api_contracts(self, query: str, top_k: int = 10, store=None) -> List[str]:
+        _store = store or vector_store
+        hits = _store.search(query, top_k=top_k, doc_type_filter="api_contract")
         return [h["text"] for h in hits]
 
     def build_context_string(self, retrieval_result: Dict[str, Any], max_chars: int = 8000) -> str:

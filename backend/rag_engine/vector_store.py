@@ -12,7 +12,8 @@ log = structlog.get_logger()
 
 
 class VectorStore:
-    def __init__(self):
+    def __init__(self, collection_name: str = None):
+        self._collection_name = collection_name or settings.CHROMA_COLLECTION_NAME
         self._client = None
         self._collection = None
         self._embeddings = None
@@ -27,10 +28,10 @@ class VectorStore:
             import chromadb
             self._client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIR)
             self._collection = self._client.get_or_create_collection(
-                name=settings.CHROMA_COLLECTION_NAME,
+                name=self._collection_name,
                 metadata={"hnsw:space": "cosine"},
             )
-            log.info("chroma_collection_ready", name=settings.CHROMA_COLLECTION_NAME)
+            log.info("chroma_collection_ready", name=self._collection_name)
 
     def _get_embeddings(self) -> Any:
         if self._embeddings is None:
@@ -136,12 +137,21 @@ class VectorStore:
 
     def clear(self) -> None:
         self._init()
-        self._client.delete_collection(settings.CHROMA_COLLECTION_NAME)
+        self._client.delete_collection(self._collection_name)
         self._collection = self._client.get_or_create_collection(
-            name=settings.CHROMA_COLLECTION_NAME,
+            name=self._collection_name,
             metadata={"hnsw:space": "cosine"},
         )
         log.info("chroma_collection_cleared")
 
 
 vector_store = VectorStore()
+
+_store_registry: Dict[str, "VectorStore"] = {}
+
+
+def get_vector_store(project_id: str = "default") -> "VectorStore":
+    key = f"qa_{project_id}"
+    if key not in _store_registry:
+        _store_registry[key] = VectorStore(collection_name=key)
+    return _store_registry[key]

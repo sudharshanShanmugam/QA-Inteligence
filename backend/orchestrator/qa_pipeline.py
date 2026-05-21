@@ -21,6 +21,7 @@ import structlog
 
 from graph_builder.neo4j_client import get_graph
 from graph_builder.graph_queries import GraphQueryEngine
+from rag_engine.vector_store import get_vector_store
 from analytics_engine.state_transition import state_engine
 from analytics_engine.pairwise_engine import pairwise_engine
 from analytics_engine.decision_table import decision_table_builder
@@ -104,10 +105,12 @@ class QAPipeline:
         log.info("complexity_assessed", level=level, score=score)
         return level, limits
 
-    def run(self, user_story: str) -> Dict[str, Any]:
+    def run(self, user_story: str, project_id: str = "default") -> Dict[str, Any]:
         log.info("pipeline_start", story_preview=user_story[:80])
 
-        gq = self._get_graph_engine()
+        project_store = get_vector_store(project_id)
+        project_graph = get_graph(project_id)
+        gq = GraphQueryEngine(project_graph)
         feature_name = self._extract_feature_name(user_story)
 
         # LLM auto-detects module, priority and risk from the story
@@ -223,13 +226,13 @@ class QAPipeline:
         log.info("brain3_rag_llm_start")
 
         # Primary retrieval — broad feature context
-        rag_result = retriever.retrieve(user_story + " " + feature_name)
+        rag_result = retriever.retrieve(user_story + " " + feature_name, store=project_store)
         rag_context_str = retriever.build_context_string(rag_result)
 
         # Targeted retrieval — pulls field names, validation rules, and acceptance criteria
         # from the KB more directly; merged into the context if it adds new content
         _ac_query = f"{feature_name} acceptance criteria validation rules required fields error messages"
-        _ac_result = retriever.retrieve(_ac_query, top_k=10)
+        _ac_result = retriever.retrieve(_ac_query, top_k=10, store=project_store)
         _ac_context = retriever.build_context_string(_ac_result, max_chars=3000)
         if _ac_context and _ac_context.strip() not in rag_context_str:
             rag_context_str = rag_context_str + "\n\n" + _ac_context

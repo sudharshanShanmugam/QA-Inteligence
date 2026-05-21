@@ -273,12 +273,19 @@ def create_graph_adapter() -> GraphAdapter:
     return NetworkXAdapter()
 
 
-# Singleton
-_graph: GraphAdapter | None = None
+_graphs: Dict[str, GraphAdapter] = {}
 
 
-def get_graph() -> GraphAdapter:
-    global _graph
-    if _graph is None:
-        _graph = create_graph_adapter()
-    return _graph
+def get_graph(project_id: str = "default") -> GraphAdapter:
+    if project_id not in _graphs:
+        if project_id == "default":
+            _graphs[project_id] = create_graph_adapter()
+        else:
+            # Project-specific graph uses a separate pkl path
+            adapter = NetworkXAdapter.__new__(NetworkXAdapter)
+            import os
+            graph_dir = os.path.dirname(os.path.abspath(settings.GRAPH_PERSIST_PATH))
+            adapter._path = os.path.join(graph_dir, f"project_{project_id}.pkl")
+            adapter._g = adapter._load()
+            _graphs[project_id] = adapter
+    return _graphs[project_id]

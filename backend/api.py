@@ -29,12 +29,13 @@ from graph_builder.neo4j_client import get_graph
 from graph_builder.graph_queries import GraphQueryEngine
 from orchestrator.qa_pipeline import qa_pipeline
 from test_generator.llm_client import llm_client
+from project_manager import project_manager
 
 app = FastAPI(title="QA Intelligence API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001", "http://localhost:3002"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -173,18 +174,14 @@ async def ingest(
     files: List[UploadFile] = File(...),
     doc_type: str = Form("auto"),
 ):
-    results = []
+    # Read all file bytes upfront (async) before handing off to threads
+    file_payloads = [(f.filename, await f.read()) for f in files]
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {
-            executor.submit(_ingest_file, await f.read() if False else f.file.read(), f.filename, doc_type): f.filename
-            for f in files
-        }
-        # Run sequentially to avoid async issues with sync file reads
-        for f in files:
-            data = f.file.read()
-            res = executor.submit(_ingest_file, data, f.filename, doc_type)
-            results.append(res)
-        results = [r.result() for r in results]
+        futures = [
+            executor.submit(_ingest_file, data, filename, doc_type)
+            for filename, data in file_payloads
+        ]
+        results = [f.result() for f in futures]
     return {"results": results}
 
 
@@ -195,6 +192,165 @@ def analyze(body: AnalyzeRequest):
     try:
         result = qa_pipeline.run(user_story=body.user_story)
         # Snapshot token usage into the response
+        result["token_usage"] = llm_client.get_usage()
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _ingest_file_to_store(file_bytes: bytes, filename: str, doc_type: str, store) -> dict:
+    result = {"file": filename, "type": doc_type, "status": "PENDING",
+              "chunks": 0, "entities": 0, "rels": 0, "steps": []}
+    try:
+        suffix = "." + filename.split(".")[-1] if "." in filename else ".txt"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+
+        source_id = filename.rsplit(".", 1)[0]
+        document = document_loader.load_file(tmp_path, doc_type)
+        document["source_id"] = source_id
+        os.unlink(tmp_path)
+
+        relevance = llm_client.check_document_relevance(
+            content=document.get("content", ""), filename=filename, doc_type=doc_type
+        )
+        if not relevance["is_relevant"]:
+            result["status"] = "REJECTED"
+            result["reason"] = relevance["reason"]
+            return result
+
+        result["detected_type"] = relevance.get("detected_type", doc_type)
+        chunks = chunker.chunk(document)
+        chunks_stored = store.add_chunks(chunks)
+        result["chunks"] = chunks_stored
+
+        try:
+            extraction = entity_extractor.extract(document)
+            with _graph_lock:
+                gr = relationship_builder.ingest(extraction, source_id)
+            result["entities"] = gr["entities"]
+            result["rels"] = gr["relationships"]
+        except Exception:
+            pass
+
+        result["status"] = "OK"
+    except Exception as e:
+        result["status"] = "FAIL"
+        result["error"] = str(e)
+    return result
+
+
+# ── Project endpoints ─────────────────────────────────────────────────────────
+
+class CreateProjectRequest(BaseModel):
+    name: str
+    description: str = ""
+
+@app.get("/api/projects")
+def list_projects():
+    projects = project_manager.list_all()
+    # Enrich each project with kb stats
+    enriched = []
+    for p in projects:
+        try:
+            from rag_engine.vector_store import get_vector_store
+            vs = get_vector_store(p["id"])
+            chunks = vs.count()
+            sources = vs.get_all_sources()
+        except Exception:
+            chunks = 0
+            sources = []
+        enriched.append({**p, "chunks": chunks, "file_count": len(sources)})
+    return {"projects": enriched}
+
+@app.post("/api/projects")
+def create_project(body: CreateProjectRequest):
+    project = project_manager.create(body.name, body.description)
+    return project
+
+@app.get("/api/projects/{project_id}")
+def get_project(project_id: str):
+    project = project_manager.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    from rag_engine.vector_store import get_vector_store
+    vs = get_vector_store(project_id)
+    return {**project, "chunks": vs.count(), "sources": vs.get_all_sources()}
+
+@app.delete("/api/projects/{project_id}")
+def delete_project(project_id: str):
+    # Clear KB
+    try:
+        from rag_engine.vector_store import get_vector_store
+        vs = get_vector_store(project_id)
+        vs.clear()
+    except Exception:
+        pass
+    ok = project_manager.delete(project_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"status": "deleted"}
+
+@app.get("/api/projects/{project_id}/kb/status")
+def project_kb_status(project_id: str):
+    if not project_manager.get(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    from rag_engine.vector_store import get_vector_store
+    vs = get_vector_store(project_id)
+    try:
+        gq = GraphQueryEngine(get_graph(project_id))
+        graph_stats = gq.get_graph_stats()
+    except Exception as e:
+        graph_stats = {"error": str(e)}
+    return {
+        "chunks": vs.count(),
+        "sources": vs.get_all_sources(),
+        "graph": graph_stats,
+    }
+
+@app.delete("/api/projects/{project_id}/kb")
+def clear_project_kb(project_id: str):
+    if not project_manager.get(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        from rag_engine.vector_store import get_vector_store
+        vs = get_vector_store(project_id)
+        vs.clear()
+        get_graph(project_id).clear()
+        return {"status": "cleared"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/projects/{project_id}/ingest")
+async def project_ingest(
+    project_id: str,
+    files: List[UploadFile] = File(...),
+    doc_type: str = Form("auto"),
+):
+    if not project_manager.get(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    from rag_engine.vector_store import get_vector_store
+    project_store = get_vector_store(project_id)
+    file_payloads = [(f.filename, await f.read()) for f in files]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(_ingest_file_to_store, data, filename, doc_type, project_store)
+            for filename, data in file_payloads
+        ]
+        results = [f.result() for f in futures]
+    return {"results": results}
+
+@app.post("/api/projects/{project_id}/analyze")
+def project_analyze(project_id: str, body: AnalyzeRequest):
+    if not project_manager.get(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not body.user_story.strip():
+        raise HTTPException(status_code=400, detail="user_story is required")
+    try:
+        result = qa_pipeline.run(user_story=body.user_story, project_id=project_id)
         result["token_usage"] = llm_client.get_usage()
         return result
     except Exception as e:

@@ -32,10 +32,10 @@ Core rules you MUST follow:
 - When data is sparse, be conservative; do not pad with generic boilerplate.
 """
 
-FEATURE_UNDERSTANDING_PROMPT = """You are a Senior QA Architect writing a brief feature summary for a test plan.
+FEATURE_UNDERSTANDING_PROMPT = """You are a Senior QA Architect writing a plain-English feature summary for a test plan.
 
 STRICT RULE: Use ONLY what appears in the data below. Do not invent field names, rules, or APIs.
-If something is not in the data, omit it — do not write "None identified."
+If something is not in the data, omit it.
 
 ═══ INPUT DATA ═══
 
@@ -53,14 +53,15 @@ KNOWLEDGE GRAPH:
 
 ═══ OUTPUT ═══
 
-Write exactly four short bullet points — one line each, no sub-bullets:
+Write 3 to 5 short plain-English sentences. No bullet points, no bold labels, no headings, no markdown.
 
-• **What:** [one sentence — what the feature does and who uses it]
-• **Rules:** [the key business rules or constraints from the KB, comma-separated. If none in KB, derive from user story.]
-• **Integrations:** [APIs, events, or services involved. If none known, write "Not specified."]
-• **Test focus:** [the single highest-risk area to test — be specific, name the field, rule, or flow]
+Sentence 1: What this feature does and who uses it.
+Sentence 2: The most important business rule or constraint a tester must know.
+Sentence 3: What system or API this feature connects to (skip if none in the data).
+Sentence 4: The biggest risk or the most important thing to test.
+Sentence 5 (optional): Any edge case or known tricky area worth calling out.
 
-No headings, no paragraphs, no extra lines. Four bullets only."""
+Write as if explaining to a junior QA engineer in simple words. Be concise and direct."""
 
 GHERKIN_GENERATION_PROMPT = """You are a Senior QA Engineer writing Gherkin BDD test scenarios for a test plan.
 Convert the structured analytical scenarios below into valid Gherkin format.
