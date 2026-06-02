@@ -105,8 +105,15 @@ class QAPipeline:
         log.info("complexity_assessed", level=level, score=score)
         return level, limits
 
-    def run(self, user_story: str, project_id: str = "default") -> Dict[str, Any]:
-        log.info("pipeline_start", story_preview=user_story[:80])
+    def run(self, user_story: str, project_id: str = "default", clarifying_answers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        log.info("pipeline_start", story_preview=user_story[:80], has_answers=bool(clarifying_answers))
+
+        # Enrich the user story with clarifying answers for all downstream prompts
+        enriched_story = user_story
+        if clarifying_answers:
+            qa_lines = "\n".join(f"Q: {q}\nA: {a}" for q, a in clarifying_answers.items() if a.strip())
+            if qa_lines:
+                enriched_story = user_story + "\n\nADDITIONAL CONTEXT FROM USER:\n" + qa_lines
 
         project_store = get_vector_store(project_id)
         project_graph = get_graph(project_id)
@@ -274,12 +281,13 @@ class QAPipeline:
 
         # LLM: Feature Understanding
         feature_understanding = llm_client.generate_feature_understanding(
-            user_story=user_story,
+            user_story=enriched_story,
             rag_context=rag_context_str,
             module_name=primary_module.get("name", module_name),
             apis=[f"{a.get('method','')} {a.get('endpoint', a.get('name',''))}" for a in apis[:5]],
             events=[e.get("name", "") for e in events[:5]],
             business_rules=[],
+            clarifying_answers=clarifying_answers,
         )
 
         # Agentic complexity assessment — scales all downstream generation
@@ -308,7 +316,7 @@ class QAPipeline:
 
         # RAG-based functional scenario generation — scenarios come from the actual ingested documents
         functional_scenarios = llm_client.generate_functional_scenarios(
-            user_story=user_story,
+            user_story=enriched_story,
             rag_context=rag_context_str,
             feature_name=feature_name,
             risk_areas=all_risk_areas[:3],

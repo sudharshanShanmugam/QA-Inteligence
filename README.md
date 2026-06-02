@@ -1,8 +1,18 @@
-# QA Intelligence System – Three-Brain Architecture
+# QA Intelligence — Three-Brain Architecture
 
-A production-grade AI-powered QA system that **thinks** before generating tests.
-It combines a Knowledge Graph, an Analytical Engine, and an LLM/RAG pipeline
-to produce structured, traceable, risk-driven QA outputs.
+An AI-powered QA test plan generator that **thinks** before generating tests.
+It combines a Knowledge Graph, a RAG Engine, and an LLM pipeline to produce
+structured, traceable, risk-driven QA outputs — all running **fully local**.
+
+---
+
+## Live URLs
+
+| Service | URL |
+|---|---|
+| **Frontend (Next.js)** | http://localhost:3030 |
+| **Backend (FastAPI)** | http://localhost:8000 |
+| **API Docs (Swagger)** | http://localhost:8000/docs |
 
 ---
 
@@ -10,261 +20,320 @@ to produce structured, traceable, risk-driven QA outputs.
 
 ```
 User Story Input
-     │
-     ▼
+      │
+      ▼
 ┌─────────────────────────────────────────────────────────┐
-│  BRAIN 1: Knowledge Graph (Neo4j / NetworkX)            │
+│  BRAIN 1 — RAG Engine (ChromaDB)                        │
+│  • Ingested docs: BRD, SRS, API contracts, DB schemas,  │
+│    bug reports, test cases, user stories                 │
+│  • Semantic search → retrieves relevant context chunks  │
+└─────────────────────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────────────────────┐
+│  BRAIN 2 — Graph Brain (Neo4j / NetworkX)               │
 │  • Entities: Module, Feature, API, Bug, TestCase,       │
 │    Event, DBTable, State, UserJourney, BusinessRule      │
-│  • Relationships: DEPENDS_ON, TRIGGERS, VALIDATES,      │
-│    FOUND_IN, UPDATES, SPANS, TRANSITIONS_TO ...         │
-│  • Queries: Impact analysis, bug patterns, test traces   │
+│  • Impact analysis, bug patterns, dependency mapping    │
 └─────────────────────────────────────────────────────────┘
-     │  graph_data (bugs, APIs, events, impacted modules)
-     ▼
+      │
+      ▼
 ┌─────────────────────────────────────────────────────────┐
-│  BRAIN 2: Analytical Engine                             │
-│  • Boundary Value Analysis (BVA)                        │
-│  • Equivalence Partitioning (EP)                        │
-│  • State Transition Testing                             │
-│  • Pairwise / AllPairs Testing                          │
-│  • Decision Table Analysis                              │
-│  • Risk Engine (bug density × criticality × impact)     │
-│  • Regression Analyzer (impact-based test selection)    │
-│  • Event Flow Tracer (UI→API→DB→Event→Notification)     │
-│  • Bug Intelligence (pattern matching + HEADS-UP)       │
-│  • Coverage Analyzer (gap detection)                    │
+│  BRAIN 3 — LLM Brain (Ollama local)                     │
+│  • Formats intelligence into human-readable output      │
+│  • Generates Gherkin, risk scoring, test scenarios      │
+│  • Anti-hallucination: LLM formats, never invents       │
 └─────────────────────────────────────────────────────────┘
-     │  analytical_data (scenarios, risks, warnings, gaps)
-     ▼
-┌─────────────────────────────────────────────────────────┐
-│  BRAIN 3: LLM + RAG (Ollama + ChromaDB)                │
-│  • RAG: retrieve relevant SRS/BRD/bug/API chunks        │
-│  • LLM: format analytical data into human output        │
-│  • Generates: Gherkin, Edge cases, Sign-off checklist   │
-└─────────────────────────────────────────────────────────┘
-     │
-     ▼
-12-Section Structured QA Output
+      │
+      ▼
+10-Section Structured QA Output + Export to Excel
 ```
 
 ---
 
-## Output Format (12 Sections)
+## Features
 
-1. **Feature Understanding** – What the feature does, who uses it, key rules
-2. **Impacted Modules** – Direct and transitive dependency impact
-3. **Event Flow** – End-to-end trace: UI → API → DB → Event → Consumer → Notification
-4. **Risk Areas** – Scored P1-P4 with reasons (past bugs × criticality × impact)
-5. **HEADS-UP Warnings** – Pattern-matched warnings from historical bug data
-6. **Test Scenarios** – BVA + EP + Pairwise + State + Decision Table + Flow tests
-7. **Gherkin Test Cases** – BDD format with Given/When/Then and @tags
-8. **Regression Suite** – MUST-RUN and SHOULD-RUN existing tests with reasons
-9. **Test Cases to UPDATE** – Tests that need assertion/step changes
-10. **Missing Coverage** – Feature gaps, API gaps, state gaps, missing negatives
-11. **API + Event Validation** – Per-endpoint validation checklist
-12. **QA Sign-off Checklist** – Category-grouped checklist (Functional/Regression/Security/Data)
+- 📁 **Multi-project workspace** — create isolated projects, each with their own KB
+- 📄 **Document ingestion** — PDF, DOCX, TXT, MD, JSON, YAML, SQL, XLSX
+- 🧠 **Three-Brain pipeline** — RAG + Graph + LLM working together
+- 🎯 **Clarifying questions** — AI asks before generating to sharpen coverage
+- 📊 **Rich results** — 10 sections with sticky TOC navigation
+- 📜 **Analysis history** — every run persisted to disk, delete when you want
+- 📤 **Export to Excel** — 7-sheet workbook (scenarios, Gherkin, risks, regression, API, gaps)
+- 🤖 **QA Chat assistant** — session-scoped chatbot, QA & document questions only
+- 🌙 **Dark mode** — full light/dark theme toggle
+- 🔄 **Baseline compare** — diff two analysis runs side-by-side
+
+---
+
+## Output Sections
+
+| # | Section | Description |
+|---|---|---|
+| 1 | Feature Understanding | What the feature does, business rules, key flows |
+| 2 | Impacted Modules | Direct and transitive dependency impact |
+| 3 | Event Flow | End-to-end: UI → API → DB → Event → Notification |
+| 4 | Risk Areas | Scored P1–P4 with reasons |
+| 5 | Heads-Up Warnings | Pattern-matched warnings from historical bugs |
+| 6 | Test Scenarios | BVA, EP, State, Edge cases |
+| 7 | Gherkin Test Cases | BDD Given/When/Then with tags |
+| 8 | Regression Suite | Must-run existing tests with reasons |
+| 9 | Coverage Gaps | Missing areas and recommendations |
+| 10 | API & Event Validation | Per-endpoint validation checklist |
+
+---
+
+## Tech Stack
+
+### Frontend
+| | |
+|---|---|
+| Framework | **Next.js 16** (App Router, TypeScript) |
+| UI library | **MUI v9** (Material UI) |
+| Styling | **Tailwind CSS** |
+| Port | **3030** |
+
+### Backend
+| | |
+|---|---|
+| API framework | **FastAPI** (Python) |
+| Server | **Uvicorn** |
+| LLM | **Ollama** (local) via LangChain |
+| Vector DB | **ChromaDB** (file-based) |
+| Graph DB | **Neo4j** (optional) |
+| Storage | JSON files (projects + analysis history) |
+| Excel export | **openpyxl** |
+| Port | **8000** |
 
 ---
 
 ## Prerequisites
 
-### Required
 - **Python 3.11+**
-- **Ollama** running locally with models pulled:
-  ```bash
-  ollama pull llama3
-  ollama pull nomic-embed-text
-  ```
+- **Node.js 18+**
+- **Ollama** running locally
 
-### Optional
-- **Neo4j** (defaults to built-in NetworkX graph if unavailable)
-- **Docker** (for containerised deployment)
+```bash
+# Pull required models
+ollama pull llama3
+ollama pull nomic-embed-text
+```
+
+- **Neo4j** *(optional — falls back to NetworkX if unavailable)*
 
 ---
 
-## Quick Start (Local)
+## Quick Start
 
 ### 1. Clone and install
 
 ```bash
-cd QA-intelligence
+git clone <repo-url>
+cd QA-Inteligence
+
+# Backend dependencies
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+
+# Frontend dependencies
+cd frontend/web
+npm install
+cd ../..
 ```
 
 ### 2. Configure environment
 
 ```bash
-copy .env.example .env
-# Edit .env if needed (default: USE_NEO4J=false, Ollama on localhost:11434)
+cp .env.example .env
+# Edit .env — set your LLM model, Neo4j credentials if using Neo4j
 ```
 
 ### 3. Start Ollama
 
 ```bash
-# In a separate terminal
-ollama serve
+ollama serve   # in a separate terminal
 ```
 
 ### 4. Start the backend
 
 ```bash
-cd backend
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+# From project root
+.venv/bin/uvicorn backend.api:app --port 8000 --reload
 ```
 
 ### 5. Start the frontend
 
 ```bash
-# In a separate terminal
-cd frontend
-streamlit run streamlit_app.py
+cd frontend/web
+npm run dev      # runs on http://localhost:3030
 ```
 
-### 6. Open the UI
+### 6. Open the app
 
-- **Frontend:** http://localhost:8501
-- **API Docs:** http://localhost:8000/docs
+→ **http://localhost:3030**
 
 ---
 
-## Load Sample Data
+## Using the App
 
-In the Streamlit UI → Sidebar → click **"Load All Sample Data"**
+### Step 1 — Create a Project
+- Click **New Project** on the dashboard
+- Give it a name (e.g. "Checkout Feature", "User Auth")
 
-Or via API:
+### Step 2 — Ingest Documents *(optional but recommended)*
+- Go to the **Ingest** tab inside the project
+- Upload: BRD, SRS, API contracts, DB schemas, bug reports, existing test cases
+- Accepted formats: PDF, DOCX, TXT, MD, JSON, YAML, SQL, XLSX
+- More documents = more grounded, specific test output
 
-```bash
-# Ingest bug history
-curl -X POST http://localhost:8000/ingest/json \
-  -H "Content-Type: application/json" \
-  -d @backend/sample_data/bug_history_sample.json
+### Step 3 — Analyze & Generate
+- Go to the **Analyze & Generate** tab
+- Paste a user story or feature description
+- Click **Run QA Analysis** (or `⌘ + Enter`)
+- Answer the clarifying questions (or skip)
+- Get a full 10-section test plan
 
-# Check knowledge base
-curl http://localhost:8000/ingest/status
-```
+### Step 4 — Export & Edit
+- Click **Export to Excel** in the results panel
+- Edit the exported workbook — add missing scenarios, fix steps, update expected results
+- Re-ingest the edited file as **Test Cases** doc type
+- Re-run analysis for improved, KB-grounded output
 
----
-
-## Run Analysis
-
-### Via UI
-1. Open http://localhost:8501
-2. Go to **Analyze & Generate** tab
-3. Paste a user story
-4. Click **Run QA Analysis**
-
-### Via API
-
-```bash
-curl -X POST http://localhost:8000/generate-tests/ \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_story": "As a customer, I want to apply a discount coupon at checkout so that I save money",
-    "module_name": "Checkout",
-    "include_gherkin": true,
-    "include_regression": true
-  }'
-```
+### Step 5 — Chat Assistant
+- Click the 🤖 floating button (bottom-right)
+- Ask about your documents, test coverage, or QA strategy
+- Chat history persists for the session
 
 ---
 
 ## API Endpoints
 
+### Projects
 | Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/ingest/text` | Ingest plain text document |
-| POST | `/ingest/json` | Ingest structured JSON document |
-| POST | `/ingest/file` | Ingest file upload (PDF/DOCX/TXT) |
-| GET  | `/ingest/status` | Knowledge base status |
-| POST | `/analyze/` | Run QA analysis (graph + analytics only) |
-| GET  | `/analyze/graph-stats` | Knowledge graph statistics |
-| POST | `/generate-tests/` | Full test generation (all 3 brains) |
-| POST | `/generate-tests/stream` | Streaming test generation (SSE) |
-| POST | `/generate-tests/gherkin-only` | Gherkin test cases only |
-| GET  | `/health` | System health check |
-| GET  | `/docs` | Swagger UI |
+|---|---|---|
+| GET | `/api/projects` | List all projects |
+| POST | `/api/projects` | Create project |
+| DELETE | `/api/projects/{id}` | Delete project |
+| GET | `/api/projects/{id}/kb/status` | KB status (chunks, nodes, sources) |
+| DELETE | `/api/projects/{id}/kb` | Clear knowledge base |
 
----
+### Ingest
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/projects/{id}/ingest` | Upload documents |
 
-## Docker Deployment
+### Analyze
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/projects/{id}/clarify` | Get clarifying questions |
+| POST | `/api/projects/{id}/analyze` | Run full analysis |
+| GET | `/api/projects/{id}/analyses` | List analysis history |
+| DELETE | `/api/projects/{id}/analyses` | Clear all history |
+| DELETE | `/api/projects/{id}/analyses/{aid}` | Delete one analysis |
 
-```bash
-# Start all services (Neo4j + Backend + Frontend)
-cd docker
-docker-compose up -d
+### Export
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/projects/{id}/export/excel` | Export analysis as Excel |
 
-# Check logs
-docker-compose logs -f backend
-```
+### Chat
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/projects/{id}/chat` | Streaming QA chat |
 
-Services:
-- Frontend:  http://localhost:8501
-- Backend:   http://localhost:8000
-- Neo4j:     http://localhost:7474
+### Settings
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/api/settings` | LLM model + token usage |
+| POST | `/api/settings/reset-usage` | Reset global token counters |
+| GET | `/api/projects/{id}/usage` | Per-project token usage + cost |
+| POST | `/api/projects/{id}/usage/reset` | Reset project usage |
 
 ---
 
 ## Project Structure
 
 ```
-QA-intelligence/
+QA-Inteligence/
 ├── backend/
-│   ├── main.py                        # FastAPI application
-│   ├── config.py                      # Settings (env-driven)
+│   ├── api.py                     # FastAPI routes (all endpoints)
+│   ├── config.py                  # Settings (env-driven)
+│   ├── project_manager.py         # Project CRUD
+│   ├── data/
+│   │   ├── projects.json          # Project metadata
+│   │   └── analyses/              # Per-project analysis history
 │   ├── ingestion/
-│   │   ├── document_loader.py         # Multi-format document loading
-│   │   ├── chunker.py                 # Semantic text chunking
-│   │   └── schema_parser.py           # DB schema + API contract parsing
-│   ├── graph_builder/
-│   │   ├── neo4j_client.py            # Dual adapter (Neo4j + NetworkX)
-│   │   ├── entity_extractor.py        # LLM-powered entity extraction
-│   │   ├── relationship_builder.py    # Graph ingestion
-│   │   ├── graph_schema.py            # Node/relationship schema definitions
-│   │   └── graph_queries.py           # Impact analysis, bug queries
-│   ├── analytics_engine/
-│   │   ├── risk_engine.py             # Risk scoring (P1-P4)
-│   │   ├── bva_engine.py              # Boundary Value Analysis
-│   │   ├── ep_engine.py               # Equivalence Partitioning
-│   │   ├── state_transition.py        # State machine test generation
-│   │   ├── pairwise_engine.py         # AllPairs algorithm
-│   │   ├── decision_table.py          # Decision table builder
-│   │   ├── bug_intelligence.py        # Pattern matching + HEADS-UP
-│   │   ├── regression_analyzer.py     # Impact-based regression selection
-│   │   ├── event_flow_tracer.py       # E2E flow tracing
-│   │   └── coverage_analyzer.py       # Coverage gap detection
+│   │   ├── document_loader.py     # Multi-format document parsing
+│   │   └── chunker.py             # Semantic text chunking
 │   ├── rag_engine/
-│   │   ├── vector_store.py            # ChromaDB wrapper
-│   │   └── retriever.py               # Semantic search + context building
-│   ├── test_generator/
-│   │   ├── llm_client.py              # Ollama LLM client
-│   │   └── prompt_templates.py        # Structured prompts
+│   │   ├── vector_store.py        # ChromaDB vector store
+│   │   └── retriever.py           # Semantic search + context building
+│   ├── graph_builder/
+│   │   ├── neo4j_client.py        # Neo4j / NetworkX dual adapter
+│   │   ├── entity_extractor.py    # LLM entity extraction
+│   │   ├── relationship_builder.py
+│   │   └── graph_queries.py       # Impact analysis queries
 │   ├── orchestrator/
-│   │   └── qa_pipeline.py             # Three-brain orchestration
-│   ├── api/
-│   │   ├── models/                    # Pydantic request/response models
-│   │   └── routes/                    # FastAPI route handlers
-│   └── sample_data/                   # Sample BRD, bugs, APIs, schemas
+│   │   └── qa_pipeline.py         # Three-brain orchestration
+│   └── test_generator/
+│       ├── llm_client.py          # Ollama LLM client + chat filter
+│       └── prompt_templates.py    # Structured prompts
+│
 ├── frontend/
-│   └── streamlit_app.py              # Streamlit UI (12-section display)
-├── docker/
-│   ├── docker-compose.yml
-│   ├── Dockerfile.backend
-│   └── Dockerfile.frontend
-├── requirements.txt
-└── .env.example
+│   └── web/                       # Next.js 16 app
+│       ├── src/
+│       │   ├── app/
+│       │   │   ├── page.tsx           # Dashboard (project list)
+│       │   │   └── projects/[id]/     # Project workspace
+│       │   ├── components/
+│       │   │   ├── AnalyzeTab.tsx     # Analyze & Generate tab
+│       │   │   ├── IngestTab.tsx      # Document upload tab
+│       │   │   ├── ChatTab.tsx        # QA chat assistant
+│       │   │   ├── Sidebar.tsx        # KB stats + token usage
+│       │   │   └── results/
+│       │   │       ├── ResultsPanel.tsx   # 10-section results + export
+│       │   │       └── ComparePanel.tsx   # Baseline diff view
+│       │   ├── lib/
+│       │   │   ├── api.ts             # All API calls
+│       │   │   └── theme.ts           # MUI light/dark theme
+│       │   └── contexts/
+│       │       └── ThemeMode.tsx      # Dark mode context
+│       └── package.json
+│
+├── .env                           # Environment config
+├── requirements.txt               # Python dependencies
+└── README.md
 ```
 
 ---
 
-## Key Design Principles
+## Environment Variables
 
-1. **LLM formats, it does not invent** – All test scenarios come from the analytical engine and knowledge graph. LLM only converts structured data into human-readable output (Gherkin, prose, checklists).
+```env
+# LLM
+LLM_MODEL=openai/gpt-oss-120b-Turbo
+EMBED_MODEL=BAAI/bge-large-en-v1.5
+ENTITY_MODEL=meta-llama/Meta-Llama-3.1-8B-Instruct
+OLLAMA_BASE_URL=http://localhost:11434
 
-2. **Every test is traceable** – Each scenario carries `traceability: Feature → Risk → Test`
+# Neo4j (optional)
+USE_NEO4J=false
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=password
+```
 
-3. **Past bugs are primary intelligence** – Bug history drives risk scores, HEADS-UP warnings, and regression selection.
+---
 
-4. **Graceful degradation** – System works without Neo4j (uses NetworkX) and without Ollama (uses rule-based fallbacks).
+## Design Principles
 
-5. **Zero generic tests** – All tests are derived from your actual documents, not generic templates.
+1. **LLM formats, it does not invent** — all test scenarios are derived from your documents and analytical engine. The LLM only converts structured data into readable output.
+
+2. **Every test is traceable** — each scenario carries `Feature → Risk → Test` traceability.
+
+3. **Past bugs are primary intelligence** — bug history drives risk scores, warnings, and regression selection.
+
+4. **Graceful degradation** — works without Neo4j (uses NetworkX fallback) and produces useful output even with an empty knowledge base.
+
+5. **Fully local** — no data leaves your machine. All AI runs via Ollama locally.

@@ -40,6 +40,9 @@ _GENERIC_PHRASES = (
 )
 
 
+_project_ctx = threading.local()
+
+
 class LLMClient:
     def __init__(self):
         self._llm = None
@@ -47,6 +50,14 @@ class LLMClient:
         self._usage_lock = threading.Lock()
         self._input_tokens: int = 0
         self._output_tokens: int = 0
+        self._project_usage: dict = {}
+        self._project_lock = threading.Lock()
+
+    def set_project_context(self, project_id: Optional[str]) -> None:
+        _project_ctx.project_id = project_id
+
+    def clear_project_context(self) -> None:
+        _project_ctx.project_id = None
 
     # ── Token tracking ─────────────────────────────────────────────────────────
 
@@ -84,6 +95,14 @@ class LLMClient:
             self._input_tokens += inp
             self._output_tokens += out
 
+        pid = getattr(_project_ctx, "project_id", None)
+        if pid:
+            with self._project_lock:
+                if pid not in self._project_usage:
+                    self._project_usage[pid] = {"input_tokens": 0, "output_tokens": 0}
+                self._project_usage[pid]["input_tokens"] += inp
+                self._project_usage[pid]["output_tokens"] += out
+
     def get_usage(self) -> dict:
         """Return a snapshot of accumulated token usage."""
         with self._usage_lock:
@@ -93,6 +112,14 @@ class LLMClient:
         with self._usage_lock:
             self._input_tokens = 0
             self._output_tokens = 0
+
+    def get_project_usage(self, project_id: str) -> dict:
+        with self._project_lock:
+            return dict(self._project_usage.get(project_id, {"input_tokens": 0, "output_tokens": 0}))
+
+    def reset_project_usage(self, project_id: str) -> None:
+        with self._project_lock:
+            self._project_usage[project_id] = {"input_tokens": 0, "output_tokens": 0}
 
     # ── Anti-hallucination helpers ────────────────────────────────────────────
 
@@ -175,6 +202,104 @@ class LLMClient:
         raw = self.generate(prompt + "\n\nRespond with valid JSON only, no markdown fences.")
         return self._parse_json(raw, fallback)
 
+    # ── Chat pre-filters ──────────────────────────────────────────────────────
+
+    _GREETING_RE = re.compile(
+        r"^\s*(hi+|hey+|hello+|helo+|howdy|good\s*(morning|afternoon|evening|day|night)|"
+        r"how\s+(are\s+you|r\s+u|do\s+you\s+do)|what'?s\s+up|sup|"
+        r"thanks?(\s+you)?|thank\s+you|ty|thx|okay|ok|got\s+it|"
+        r"great|nice|cool|sure|sounds?\s+good|alright|alright then|"
+        r"welcome|good\s+to\s+meet|nice\s+to\s+meet)\s*[!.?]*\s*$",
+        re.IGNORECASE,
+    )
+
+    _QA_KEYWORDS_RE = re.compile(
+        r"test|qa|quality|bug|defect|scenario|gherkin|bdd|regression|"
+        r"coverage|risk|assertion|assert|acceptance|criteria|sprint|story|"
+        r"feature|automation|manual|selenium|playwright|pytest|unittest|"
+        r"api|endpoint|request|response|payload|status\s*code|mock|stub|"
+        r"performance|load|stress|security|penetration|sanity|smoke|"
+        r"exploratory|boundary|equivalence|partition|edge\s*case|"
+        r"traceability|priority|severity|blocker|critical|module|"
+        r"integration|system|unit|e2e|end.to.end|release|deploy|"
+        # document / KB related
+        r"document|doc(s|type|ument)?|upload|ingest|brd|srs|user.?stor|"
+        r"knowledge.?base|kb|contract|schema|spec(ification)?|pdf|docx|xlsx|"
+        r"accurate|accuracy|better.?result|more.?correct|improve|coverage|"
+        r"what.*(accept|need|require|help)|which.*(doc|file|upload)|"
+        r"validate|verify|check|pass|fail|expected|actual|steps?|precondition",
+        re.IGNORECASE,
+    )
+
+    _GREETING_REPLIES = [
+        "Hey there! 👋 I'm your QA assistant. Ask me anything about test strategies, test cases, bug triage, or coverage.",
+        "Hello! Great to see you. I'm here to help with all things QA — test plans, Gherkin, risk analysis, you name it.",
+        "Hi! I'm your QA Intelligence assistant. What QA challenge can I help you with today?",
+        "Hey! Ready to talk testing. Ask me about test scenarios, edge cases, regression suites, or anything quality-related.",
+        "Good to hear from you! I specialise in QA and software testing. What would you like help with?",
+    ]
+
+    _BLOCK_REPLY = (
+        "🚫 I'm a QA-focused assistant — I can only help with software testing and quality topics.\n\n"
+        "Try asking me about:\n"
+        "- **Test cases or scenarios** for your feature\n"
+        "- **Bug triage** or defect severity\n"
+        "- **Regression suite** coverage\n"
+        "- **Gherkin / BDD** test writing\n"
+        "- **Risk-based testing** strategies"
+    )
+
+    def _classify_message(self, message: str) -> str:
+        """Returns 'greeting', 'qa', or 'offtopic'."""
+        stripped = message.strip()
+        if self._GREETING_RE.match(stripped):
+            return "greeting"
+        if self._QA_KEYWORDS_RE.search(stripped):
+            return "qa"
+        # Short messages (≤6 words) that aren't greetings but have no QA keywords
+        # are likely small-talk — treat as off-topic only if they look like statements
+        # about non-QA subjects (simple word-count heuristic).
+        words = stripped.split()
+        if len(words) <= 3 and not self._QA_KEYWORDS_RE.search(stripped):
+            return "greeting"   # probably a very short casual message — be lenient
+        if len(words) > 3 and not self._QA_KEYWORDS_RE.search(stripped):
+            return "offtopic"
+        return "qa"
+
+    def chat_stream(
+        self,
+        message: str,
+        history: List[Dict[str, str]],
+        context: str = "",
+    ) -> Generator[str, None, None]:
+        """Stream a QA-scoped chat response. History items: [{role, content}]."""
+        import random
+
+        intent = self._classify_message(message)
+
+        # ── Instant greeting — no LLM call ───────────────────────────────────
+        if intent == "greeting":
+            yield random.choice(self._GREETING_REPLIES)
+            return
+
+        # ── Instant block for off-topic — no LLM call ────────────────────────
+        if intent == "offtopic":
+            yield self._BLOCK_REPLY
+            return
+
+        # ── QA question — call LLM ───────────────────────────────────────────
+        from test_generator.prompt_templates import QA_CHAT_PROMPT
+        history_text = "\n".join(
+            f"{'USER' if m['role'] == 'user' else 'ASSISTANT'}: {m['content']}"
+            for m in history[-10:]  # keep last 10 turns
+        ) or "None"
+        prompt = QA_CHAT_PROMPT.format(
+            context=context[:1500] if context else "No analysis context available.",
+            history=history_text,
+            message=message,
+        )
+        yield from self.stream(prompt, temperature=0.3)
+
     def stream(self, prompt: str, temperature: float = 0) -> Generator[str, None, None]:
         """Stream tokens from the LLM. Estimates usage at ~4 chars per token."""
         llm = self._get_llm(temperature)
@@ -193,6 +318,17 @@ class LLMClient:
                 self._input_tokens += max(1, len(prompt) // 4)
                 self._output_tokens += max(0, output_chars // 4)
 
+    def generate_clarification_questions(self, user_story: str, rag_context: str) -> List[Dict[str, str]]:
+        from test_generator.prompt_templates import CLARIFICATION_QUESTIONS_PROMPT
+        prompt = CLARIFICATION_QUESTIONS_PROMPT.format(
+            user_story=user_story[:1000],
+            rag_context=rag_context[:2000] if rag_context else "No knowledge base loaded.",
+        )
+        result = self.generate_json(prompt, fallback=[])
+        if isinstance(result, list):
+            return [q for q in result if isinstance(q, dict) and "question" in q]
+        return []
+
     def generate_feature_understanding(
         self,
         user_story: str,
@@ -201,10 +337,16 @@ class LLMClient:
         apis: List[str],
         events: List[str],
         business_rules: List[str],
+        clarifying_answers: Optional[Dict[str, str]] = None,
     ) -> str:
         from test_generator.prompt_templates import FEATURE_UNDERSTANDING_PROMPT
+        enriched_story = user_story
+        if clarifying_answers:
+            qa_lines = "\n".join(f"Q: {q}\nA: {a}" for q, a in clarifying_answers.items() if a.strip())
+            if qa_lines:
+                enriched_story = user_story + "\n\nADDITIONAL CONTEXT FROM USER:\n" + qa_lines
         prompt = FEATURE_UNDERSTANDING_PROMPT.format(
-            user_story=user_story[:800],
+            user_story=enriched_story[:1200],
             rag_context=rag_context[:4000],
             module_name=module_name or "Unknown",
             apis=", ".join(apis[:5]) or "None identified",

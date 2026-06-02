@@ -135,15 +135,35 @@ export default function IngestTab({ projectId, onIngestComplete }: IngestTabProp
   const handleFiles = useCallback(async (files: File[]) => {
     if (!files.length) return;
     setLoading(true);
-    try {
-      const res = await ingestProjectFiles(projectId, files, docType);
-      setResults((prev) => [...res.results, ...prev]);
-      onIngestComplete?.();
-    } catch (e: any) {
-      alert(e.message);
-    } finally {
-      setLoading(false);
+
+    // Seed results with PENDING entries so the user sees all files immediately
+    const pending = files.map((f): IngestFileResult => ({
+      file: f.name, type: docType, status: "PENDING", chunks: 0, entities: 0, rels: 0,
+    }));
+    setResults((prev) => [...pending, ...prev]);
+
+    for (let i = 0; i < files.length; i++) {
+      try {
+        const res = await ingestProjectFiles(projectId, [files[i]], docType);
+        const fileResult = res.results[0];
+        setResults((prev) => {
+          const updated = [...prev];
+          const idx = updated.findIndex((r) => r.file === files[i].name && r.status === "PENDING");
+          if (idx !== -1) updated[idx] = fileResult;
+          return updated;
+        });
+      } catch (e: any) {
+        setResults((prev) => {
+          const updated = [...prev];
+          const idx = updated.findIndex((r) => r.file === files[i].name && r.status === "PENDING");
+          if (idx !== -1) updated[idx] = { file: files[i].name, type: docType, status: "FAIL", chunks: 0, entities: 0, rels: 0, error: e.message };
+          return updated;
+        });
+      }
     }
+
+    onIngestComplete?.();
+    setLoading(false);
   }, [projectId, docType, onIngestComplete]);
 
   const onDrop = (e: React.DragEvent) => {
@@ -159,17 +179,17 @@ export default function IngestTab({ projectId, onIngestComplete }: IngestTabProp
 
       {/* ── Page title ── */}
       <Box>
-        <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#0f172a", lineHeight: 1.2 }}>
+        <Typography sx={{ fontWeight: 800, fontSize: 22, color: "text.primary", lineHeight: 1.2 }}>
           Upload Documents
         </Typography>
-        <Typography sx={{ color: "#64748b", fontSize: 14, mt: 0.5 }}>
-          Feed your project's knowledge base — BRDs, specs, bug reports, API contracts and more.
+        <Typography sx={{ color: "text.secondary", fontSize: 14, mt: 0.5 }}>
+          Feed your project&apos;s knowledge base — BRDs, specs, bug reports, API contracts and more.
         </Typography>
       </Box>
 
       {/* ── Doc type selector row ── */}
       <Box>
-        <Typography sx={{ fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.08em", mb: 1.5 }}>
+        <Typography sx={{ fontSize: 11, fontWeight: 700, color: "text.disabled", textTransform: "uppercase", letterSpacing: "0.08em", mb: 1.5 }}>
           Document type
         </Typography>
         <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
@@ -183,14 +203,15 @@ export default function IngestTab({ projectId, onIngestComplete }: IngestTabProp
                   display: "flex", alignItems: "center", gap: "7px",
                   px: "14px", py: "8px", borderRadius: "12px",
                   cursor: "pointer", transition: "all 0.15s",
-                  bgcolor: active ? bg : "white",
-                  border: `1.5px solid ${active ? border : "#e2e8f0"}`,
+                  bgcolor: active ? bg : "background.paper",
+                  border: `1.5px solid`,
+                  borderColor: active ? border : "divider",
                   boxShadow: active ? `0 0 0 3px ${color}18` : "none",
                   "&:hover": { borderColor: active ? border : color + "60", bgcolor: active ? bg : color + "08" },
                 }}
               >
-                <Icon sx={{ fontSize: 15, color: active ? color : "#94a3b8" }} />
-                <Typography sx={{ fontSize: 12.5, fontWeight: active ? 700 : 500, color: active ? color : "#475569", whiteSpace: "nowrap" }}>
+                <Icon sx={{ fontSize: 15, color: active ? color : "text.disabled" }} />
+                <Typography sx={{ fontSize: 12.5, fontWeight: active ? 700 : 500, color: active ? color : "text.secondary", whiteSpace: "nowrap" }}>
                   {label}
                 </Typography>
               </Box>
@@ -207,10 +228,9 @@ export default function IngestTab({ projectId, onIngestComplete }: IngestTabProp
         onClick={() => inputRef.current?.click()}
         sx={{
           borderRadius: "24px",
-          border: dragging ? `2px solid ${selected.color}` : "2px dashed #cbd5e1",
-          background: dragging
-            ? `${selected.color}06`
-            : "linear-gradient(160deg, #fafbff 0%, #f8fafc 100%)",
+          border: dragging ? `2px solid ${selected.color}` : "2px dashed",
+          borderColor: dragging ? selected.color : "divider",
+          bgcolor: dragging ? `${selected.color}06` : "background.paper",
           display: "flex", flexDirection: "column",
           alignItems: "center", justifyContent: "center",
           gap: 1.5, py: 5, px: 4,
@@ -218,17 +238,17 @@ export default function IngestTab({ projectId, onIngestComplete }: IngestTabProp
           boxShadow: dragging ? `0 0 0 5px ${selected.color}14` : "0 1px 4px rgba(0,0,0,0.04)",
           "&:hover": {
             borderColor: selected.color + "80",
-            background: selected.color + "04",
+            bgcolor: selected.color + "04",
           },
           position: "relative", overflow: "hidden",
         }}
       >
         {/* Dot grid background */}
-        <Box sx={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+        <Box sx={{ position: "absolute", inset: 0, pointerEvents: "none", opacity: 0.5 }}>
           <svg width="100%" height="100%">
             <defs>
               <pattern id="itdots" x="0" y="0" width="26" height="26" patternUnits="userSpaceOnUse">
-                <circle cx="1.3" cy="1.3" r="1" fill={dragging ? selected.color : "#e2e8f0"} fillOpacity={dragging ? 0.25 : 0.6} />
+                <circle cx="1.3" cy="1.3" r="1" fill={dragging ? selected.color : "#94a3b8"} fillOpacity={dragging ? 0.25 : 0.4} />
               </pattern>
             </defs>
             <rect width="100%" height="100%" fill="url(#itdots)" />
@@ -242,12 +262,12 @@ export default function IngestTab({ projectId, onIngestComplete }: IngestTabProp
         <Box sx={{ textAlign: "center", position: "relative" }}>
           <Typography sx={{
             fontSize: 17, fontWeight: 700,
-            color: dragging ? selected.color : "#1e293b",
+            color: dragging ? selected.color : "text.primary",
             mb: 0.5, transition: "color 0.2s",
           }}>
             {dragging ? `Drop to ingest as ${selected.label}` : "Drop files here to upload"}
           </Typography>
-          <Typography sx={{ fontSize: 13, color: "#94a3b8" }}>
+          <Typography sx={{ fontSize: 13, color: "text.disabled" }}>
             or{" "}
             <span style={{ color: selected.color, fontWeight: 600, textDecoration: "underline", textUnderlineOffset: 3 }}>
               browse your computer
@@ -279,52 +299,67 @@ export default function IngestTab({ projectId, onIngestComplete }: IngestTabProp
       </Box>
 
       {/* ── Processing ── */}
-      {loading && (
-        <Box sx={{
-          bgcolor: "white", border: "1px solid #e0e7ff",
-          borderRadius: "16px", px: 3, py: 2.5, overflow: "hidden", position: "relative",
-        }}>
-          <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 1.5 }}>
-            <CircularProgress size={18} sx={{ color: "#6366f1", flexShrink: 0 }} />
-            <Typography sx={{ fontWeight: 700, fontSize: 14, color: "#3730a3" }}>Processing your documents…</Typography>
-            <Box sx={{ ml: "auto", display: "flex", gap: 1.5 }}>
-              {["Extracting", "Embedding", "Graph"].map((s, i) => (
-                <Box key={s} sx={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                  <Box sx={{
-                    width: 5, height: 5, borderRadius: "50%", bgcolor: "#6366f1",
-                    animation: "pulseDot 1s infinite", animationDelay: `${i * 0.22}s`,
-                    "@keyframes pulseDot": { "0%,100%": { opacity: 0.25, transform: "scale(0.7)" }, "50%": { opacity: 1, transform: "scale(1)" } },
-                  }} />
-                  <Typography sx={{ fontSize: 11, color: "#6366f1", fontWeight: 500 }}>{s}</Typography>
-                </Box>
-              ))}
+      {loading && (() => {
+        const pendingCount = results.filter(r => r.status === "PENDING").length;
+        const doneCount = results.filter(r => r.status !== "PENDING").length;
+        const total = pendingCount + doneCount;
+        const progress = total > 0 ? Math.round((doneCount / total) * 100) : 0;
+        return (
+          <Box sx={{
+            bgcolor: "background.paper",
+            border: "1px solid", borderColor: "primary.main" + "30",
+            borderRadius: "16px", px: 3, py: 2.5, overflow: "hidden",
+          }}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 1.5 }}>
+              <CircularProgress size={18} sx={{ color: "primary.main", flexShrink: 0 }} />
+              <Typography sx={{ fontWeight: 700, fontSize: 14, color: "primary.main" }}>
+                Processing {pendingCount > 0 ? `${doneCount} / ${total} files` : "documents"}…
+              </Typography>
+              <Box sx={{ ml: "auto", display: "flex", gap: 1.5 }}>
+                {["Extracting", "Embedding", "Graph"].map((s, i) => (
+                  <Box key={s} sx={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                    <Box sx={{
+                      width: 5, height: 5, borderRadius: "50%", bgcolor: "primary.main",
+                      animation: "pulseDot 1s infinite", animationDelay: `${i * 0.22}s`,
+                      "@keyframes pulseDot": { "0%,100%": { opacity: 0.25, transform: "scale(0.7)" }, "50%": { opacity: 1, transform: "scale(1)" } },
+                    }} />
+                    <Typography sx={{ fontSize: 11, color: "primary.main", fontWeight: 500 }}>{s}</Typography>
+                  </Box>
+                ))}
+              </Box>
             </Box>
+            <LinearProgress
+              variant="determinate"
+              value={progress}
+              sx={{
+                borderRadius: 2, height: 4,
+                bgcolor: "primary.main" + "18",
+                "& .MuiLinearProgress-bar": { background: "linear-gradient(90deg, #6366f1, #818cf8)", borderRadius: 2, transition: "transform 0.4s ease" },
+              }}
+            />
+            <Typography sx={{ fontSize: 11, color: "primary.main", mt: 0.75, textAlign: "right" }}>{progress}%</Typography>
           </Box>
-          <LinearProgress sx={{
-            borderRadius: 2, height: 3,
-            bgcolor: "#e0e7ff",
-            "& .MuiLinearProgress-bar": { background: "linear-gradient(90deg, #6366f1, #818cf8)" },
-          }} />
-        </Box>
-      )}
+        );
+      })()}
 
       {/* ── Results ── */}
       {results.length > 0 && (
         <Box>
           {/* Section label */}
           <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 2 }}>
-            <Box sx={{ width: 3, height: 18, borderRadius: 2, bgcolor: "#6366f1" }} />
-            <Typography sx={{ fontSize: 12, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: "0.07em" }}>
+            <Box sx={{ width: 3, height: 18, borderRadius: 2, bgcolor: "primary.main" }} />
+            <Typography sx={{ fontSize: 12, fontWeight: 700, color: "text.secondary", textTransform: "uppercase", letterSpacing: "0.07em" }}>
               Uploaded Files
             </Typography>
-            <Box sx={{ px: "9px", py: "2px", borderRadius: "999px", bgcolor: "#eef2ff", border: "1px solid #c7d2fe" }}>
-              <Typography sx={{ fontSize: 11, fontWeight: 700, color: "#4f46e5" }}>{results.length}</Typography>
+            <Box sx={{ px: "9px", py: "2px", borderRadius: "999px", bgcolor: "primary.main" + "12", border: "1px solid", borderColor: "primary.main" + "30" }}>
+              <Typography sx={{ fontSize: 11, fontWeight: 700, color: "primary.main" }}>{results.length}</Typography>
             </Box>
           </Box>
 
           {/* File rows */}
           <Box sx={{
-            bgcolor: "white", border: "1px solid #e2e8f0",
+            bgcolor: "background.paper",
+            border: "1px solid", borderColor: "divider",
             borderRadius: "20px", overflow: "hidden",
             boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
           }}>
@@ -337,11 +372,12 @@ export default function IngestTab({ projectId, onIngestComplete }: IngestTabProp
                   sx={{
                     display: "flex", alignItems: "center", gap: 2,
                     px: 3, py: 2,
-                    borderBottom: i < results.length - 1 ? "1px solid #f1f5f9" : "none",
+                    borderBottom: i < results.length - 1 ? "1px solid" : "none",
+                    borderBottomColor: "divider",
                     animation: "rowIn 0.28s ease both",
                     animationDelay: `${i * 40}ms`,
                     "@keyframes rowIn": { from: { opacity: 0, transform: "translateX(-8px)" }, to: { opacity: 1, transform: "translateX(0)" } },
-                    "&:hover": { bgcolor: "#fafbff" },
+                    "&:hover": { bgcolor: "background.default" },
                     transition: "background 0.15s",
                   }}
                 >
@@ -356,12 +392,12 @@ export default function IngestTab({ projectId, onIngestComplete }: IngestTabProp
 
                   {/* Name + type */}
                   <Box sx={{ flex: 1, minWidth: 0 }}>
-                    <Typography sx={{ fontWeight: 600, fontSize: 13.5, color: "#0f172a", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <Typography sx={{ fontWeight: 600, fontSize: 13.5, color: "text.primary", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {r.file}
                     </Typography>
                     <Box sx={{ display: "flex", alignItems: "center", gap: 1, mt: 0.3 }}>
                       {r.detected_type && (
-                        <Typography sx={{ fontSize: 11, color: "#94a3b8" }}>{dt.label}</Typography>
+                        <Typography sx={{ fontSize: 11, color: "text.disabled" }}>{dt.label}</Typography>
                       )}
                       {r.reason && (
                         <Typography sx={{ fontSize: 11, color: "#b45309" }}>· {r.reason}</Typography>
