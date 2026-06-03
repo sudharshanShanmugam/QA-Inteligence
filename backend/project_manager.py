@@ -6,7 +6,9 @@ from typing import Dict, List, Optional
 
 class ProjectManager:
     def __init__(self):
-        self._path = Path("./backend/data/projects.json")
+        from config import settings
+        base = Path(settings.DATA_DIR) if settings.DATA_DIR else Path("./backend/data")
+        self._path = base / "projects.json"
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._projects: Dict[str, dict] = self._load()

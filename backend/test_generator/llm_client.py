@@ -52,6 +52,14 @@ class LLMClient:
         self._output_tokens: int = 0
         self._project_usage: dict = {}
         self._project_lock = threading.Lock()
+        self._model_override: Optional[str] = None
+        self._api_key_override: Optional[str] = None
+        self._base_url_override: Optional[str] = None
+
+    def configure(self, model: str, api_key: str, base_url: str) -> None:
+        self._model_override = model
+        self._api_key_override = api_key
+        self._base_url_override = base_url
 
     def set_project_context(self, project_id: Optional[str]) -> None:
         _project_ctx.project_id = project_id
@@ -174,9 +182,9 @@ class LLMClient:
     def _get_llm(self, temperature: float = 0):
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
-            openai_api_key=settings.DEEPINFRA_API_KEY,
-            openai_api_base=settings.DEEPINFRA_BASE_URL,
-            model=settings.LLM_MODEL,
+            openai_api_key=self._api_key_override or settings.DEEPINFRA_API_KEY,
+            openai_api_base=self._base_url_override or settings.DEEPINFRA_BASE_URL,
+            model=self._model_override or settings.LLM_MODEL,
             temperature=temperature,
             seed=42,
             timeout=60,

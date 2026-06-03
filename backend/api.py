@@ -37,9 +37,14 @@ from project_manager import project_manager
 
 app = FastAPI(title="QA Intelligence API", version="1.0.0")
 
+def _cors_origins() -> list:
+    if settings.ALLOWED_ORIGINS:
+        return [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
+    return ["http://localhost:1111", "http://localhost:2222"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:1111", "http://localhost:2222"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,6 +61,61 @@ _PRICING: Dict[str, tuple] = {
     "mistralai/Mixtral-8x7B-Instruct-v0.1":    (0.27, 0.27),
     "deepseek-ai/DeepSeek-R1":                 (0.55, 2.19),
     "Qwen/Qwen2.5-72B-Instruct":               (0.35, 0.40),
+    "gpt-4o":                                  (2.50, 10.00),
+    "gpt-4o-mini":                             (0.15, 0.60),
+    "gpt-4-turbo":                             (10.00, 30.00),
+    "gpt-3.5-turbo":                           (0.50, 1.50),
+    "llama-3.3-70b-versatile":                 (0.59, 0.79),
+    "llama-3.1-8b-instant":                    (0.05, 0.08),
+    "mixtral-8x7b-32768":                      (0.24, 0.24),
+    "gemma2-9b-it":                            (0.20, 0.20),
+}
+
+# ── Providers ─────────────────────────────────────────────────────────────────
+_PROVIDERS: Dict[str, Any] = {
+    "deepinfra": {
+        "name": "DeepInfra",
+        "base_url": "https://api.deepinfra.com/v1/openai",
+        "key_required": True,
+        "models": [
+            "openai/gpt-oss-120b-Turbo",
+            "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "meta-llama/Meta-Llama-3.1-70B-Instruct",
+            "meta-llama/Meta-Llama-3.1-405B-Instruct",
+            "mistralai/Mixtral-8x7B-Instruct-v0.1",
+            "deepseek-ai/DeepSeek-R1",
+            "Qwen/Qwen2.5-72B-Instruct",
+        ],
+    },
+    "openai": {
+        "name": "OpenAI",
+        "base_url": "https://api.openai.com/v1",
+        "key_required": True,
+        "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
+    },
+    "groq": {
+        "name": "Groq",
+        "base_url": "https://api.groq.com/openai/v1",
+        "key_required": True,
+        "models": [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it",
+        ],
+    },
+    "ollama": {
+        "name": "Ollama (Local)",
+        "base_url": "http://localhost:11434/v1",
+        "key_required": False,
+        "models": ["llama3.2", "llama3.1", "mistral", "codellama", "phi3"],
+    },
+}
+
+# ── Runtime LLM config (updated via /api/settings/llm) ────────────────────────
+_runtime_llm: Dict[str, str] = {
+    "provider": "deepinfra",
+    "model": settings.LLM_MODEL,
 }
 
 
@@ -129,7 +189,8 @@ class AnalysisHistoryManager:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._dir = Path(__file__).parent / "data" / "analyses"
+        base = Path(settings.DATA_DIR) if settings.DATA_DIR else Path(__file__).parent / "data"
+        self._dir = base / "analyses"
         self._dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, project_id: str) -> Path:
@@ -195,7 +256,7 @@ def health():
 
 @app.get("/api/settings")
 def get_settings():
-    model = settings.LLM_MODEL
+    model = _runtime_llm["model"]
     price = _PRICING.get(model)
     usage = llm_client.get_usage()
     inp_tok = usage["input_tokens"]
@@ -211,11 +272,40 @@ def get_settings():
         }
     return {
         "model": model,
+        "provider": _runtime_llm["provider"],
         "embed_model": settings.EMBED_MODEL,
         "entity_model": settings.ENTITY_MODEL,
         "usage": {"input_tokens": inp_tok, "output_tokens": out_tok},
         "cost": cost,
     }
+
+
+@app.get("/api/settings/providers")
+def get_providers():
+    return _PROVIDERS
+
+
+class LLMConfigRequest(BaseModel):
+    provider: str
+    model: str
+    api_key: str = ""
+
+
+@app.post("/api/settings/llm")
+def update_llm_settings(req: LLMConfigRequest):
+    provider = _PROVIDERS.get(req.provider)
+    if not provider:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {req.provider}")
+    if provider["key_required"] and not req.api_key:
+        raise HTTPException(status_code=400, detail="API key is required for this provider")
+    llm_client.configure(
+        model=req.model,
+        api_key=req.api_key or "ollama",
+        base_url=provider["base_url"],
+    )
+    _runtime_llm["provider"] = req.provider
+    _runtime_llm["model"] = req.model
+    return {"status": "ok", "provider": req.provider, "model": req.model}
 
 
 @app.post("/api/settings/reset-usage")

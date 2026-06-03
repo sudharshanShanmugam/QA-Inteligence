@@ -1,17 +1,25 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Box, Typography, CircularProgress, Tooltip, IconButton } from "@mui/material";
+import {
+  Box, Typography, CircularProgress, Tooltip, IconButton,
+  Select, MenuItem, FormControl, InputLabel, TextField,
+  InputAdornment, Collapse, Button,
+} from "@mui/material";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import BoltIcon from "@mui/icons-material/Bolt";
 import StorageIcon from "@mui/icons-material/Storage";
 import HubIcon from "@mui/icons-material/Hub";
 import DeleteIcon from "@mui/icons-material/Delete";
 import TuneIcon from "@mui/icons-material/Tune";
+import EditIcon from "@mui/icons-material/Edit";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
+import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import {
   getSettings, getProjectKBStatus, clearProjectKB,
-  getProjectUsage, resetProjectUsage,
-  AppSettings, KBStatus, ProjectUsage,
+  getProjectUsage, resetProjectUsage, getProviders, updateLLMSettings,
+  AppSettings, KBStatus, ProjectUsage, ProviderInfo,
 } from "@/lib/api";
 
 interface SidebarProps {
@@ -26,6 +34,17 @@ export default function Sidebar({ projectId, onKBChange, refreshKey = 0 }: Sideb
   const [projectUsage, setProjectUsage] = useState<ProjectUsage | null>(null);
   const [clearing, setClearing] = useState(false);
 
+  // LLM settings panel
+  const [providers, setProviders] = useState<Record<string, ProviderInfo>>({});
+  const [llmOpen, setLlmOpen] = useState(false);
+  const [selectedProvider, setSelectedProvider] = useState("deepinfra");
+  const [selectedModel, setSelectedModel] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveOk, setSaveOk] = useState(false);
+  const [saveErr, setSaveErr] = useState("");
+
   const load = useCallback(async () => {
     const [s, k, u] = await Promise.all([
       getSettings(),
@@ -35,9 +54,42 @@ export default function Sidebar({ projectId, onKBChange, refreshKey = 0 }: Sideb
     setSettings(s);
     setKb(k);
     setProjectUsage(u);
+    setSelectedProvider(s.provider ?? "deepinfra");
+    setSelectedModel(s.model ?? "");
   }, [projectId]);
 
   useEffect(() => { load(); }, [load, refreshKey]);
+
+  useEffect(() => {
+    getProviders().then(setProviders).catch(() => {});
+  }, []);
+
+  // When provider changes, default to its first model
+  const handleProviderChange = (prov: string) => {
+    setSelectedProvider(prov);
+    const first = providers[prov]?.models[0] ?? "";
+    setSelectedModel(first);
+    setSaveOk(false);
+    setSaveErr("");
+  };
+
+  const handleApply = async () => {
+    setSaving(true);
+    setSaveOk(false);
+    setSaveErr("");
+    try {
+      await updateLLMSettings(selectedProvider, selectedModel, apiKey);
+      setSaveOk(true);
+      setLlmOpen(false);
+      const s = await getSettings();
+      setSettings(s);
+      setTimeout(() => setSaveOk(false), 3000);
+    } catch (e: unknown) {
+      setSaveErr(e instanceof Error ? e.message : "Failed to apply");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const handleClearKB = async () => {
     setClearing(true);
@@ -53,7 +105,9 @@ export default function Sidebar({ projectId, onKBChange, refreshKey = 0 }: Sideb
     setProjectUsage(u);
   };
 
-  const shortModel = settings?.model.split("/").pop() ?? "—";
+  const shortModel = (settings?.model ?? "—").split("/").pop() ?? "—";
+  const currentProviderName = providers[settings?.provider ?? ""]?.name ?? settings?.provider ?? "—";
+  const keyRequired = providers[selectedProvider]?.key_required ?? true;
   const hasUsage = projectUsage && (projectUsage.usage.input_tokens > 0 || projectUsage.usage.output_tokens > 0);
 
   return (
@@ -97,34 +151,126 @@ export default function Sidebar({ projectId, onKBChange, refreshKey = 0 }: Sideb
 
       <Box sx={{ mx: 3, borderBottom: "1px solid", borderBottomColor: "divider" }} />
 
-      {/* ── LLM Model ── */}
+      {/* ── LLM Settings ── */}
       <Box sx={{ px: 3, pt: 2.5, pb: 2 }}>
-        <Box sx={{ display: "flex", alignItems: "center", gap: "6px", mb: 1.5 }}>
-          <TuneIcon sx={{ fontSize: 12, color: "#94a3b8" }} />
-          <Typography sx={{ color: "#94a3b8", fontSize: 9.5, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase" }}>
-            LLM Model
-          </Typography>
-        </Box>
-        <Tooltip title={settings?.model ?? ""} placement="right">
-          <Box sx={{
-            bgcolor: "primary.main" + "12",
-            border: "1px solid", borderColor: "primary.main" + "30",
-            borderRadius: "11px",
-            px: 2, py: 1.5,
-            display: "flex", alignItems: "center", gap: "10px",
-          }}>
-            <Box sx={{
-              width: 7, height: 7, borderRadius: "50%", bgcolor: "#4ade80", flexShrink: 0,
-              boxShadow: "0 0 5px #4ade80",
-            }} />
-            <Typography sx={{
-              color: "primary.main", fontWeight: 700, fontSize: 12,
-              fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-            }}>
-              {shortModel}
+        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1.5 }}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            <TuneIcon sx={{ fontSize: 12, color: "#94a3b8" }} />
+            <Typography sx={{ color: "#94a3b8", fontSize: 9.5, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+              LLM Settings
             </Typography>
           </Box>
-        </Tooltip>
+          <Tooltip title={llmOpen ? "Close" : "Change model"}>
+            <IconButton size="small" onClick={() => { setLlmOpen(v => !v); setSaveErr(""); }}
+              sx={{ color: llmOpen ? "primary.main" : "#94a3b8", p: 0.4, "&:hover": { color: "primary.main" } }}>
+              <EditIcon sx={{ fontSize: 13 }} />
+            </IconButton>
+          </Tooltip>
+        </Box>
+
+        {/* Collapsed view */}
+        {!llmOpen && (
+          <Tooltip title={settings?.model ?? ""} placement="right">
+            <Box sx={{
+              bgcolor: "primary.main" + "12",
+              border: "1px solid", borderColor: "primary.main" + "30",
+              borderRadius: "11px", px: 2, py: 1.5,
+              display: "flex", alignItems: "center", gap: "10px",
+            }}>
+              <Box sx={{ display: "flex", flexDirection: "column", overflow: "hidden", flex: 1 }}>
+                <Typography sx={{ color: "#94a3b8", fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                  {currentProviderName}
+                </Typography>
+                <Typography sx={{
+                  color: "primary.main", fontWeight: 700, fontSize: 12,
+                  fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}>
+                  {shortModel}
+                </Typography>
+              </Box>
+              <Box sx={{ display: "flex", alignItems: "center", gap: "5px" }}>
+                {saveOk && <CheckCircleIcon sx={{ fontSize: 14, color: "#4ade80" }} />}
+                <Box sx={{ width: 7, height: 7, borderRadius: "50%", bgcolor: "#4ade80", boxShadow: "0 0 5px #4ade80", flexShrink: 0 }} />
+              </Box>
+            </Box>
+          </Tooltip>
+        )}
+
+        {/* Expanded form */}
+        <Collapse in={llmOpen}>
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mt: 1 }}>
+
+            {/* Provider */}
+            <FormControl size="small" fullWidth>
+              <InputLabel sx={{ fontSize: 12 }}>Provider</InputLabel>
+              <Select
+                value={selectedProvider}
+                label="Provider"
+                onChange={e => handleProviderChange(e.target.value)}
+                sx={{ fontSize: 12 }}
+              >
+                {Object.entries(providers).map(([key, p]) => (
+                  <MenuItem key={key} value={key} sx={{ fontSize: 12 }}>{p.name}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+
+            {/* Model */}
+            <FormControl size="small" fullWidth>
+              <InputLabel sx={{ fontSize: 12 }}>Model</InputLabel>
+              <Select
+                value={selectedModel}
+                label="Model"
+                onChange={e => setSelectedModel(e.target.value)}
+                sx={{ fontSize: 12 }}
+              >
+                {(providers[selectedProvider]?.models ?? []).map(m => (
+                  <MenuItem key={m} value={m} sx={{ fontSize: 11, fontFamily: "monospace" }}>{m}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+
+            {/* API Key */}
+            {keyRequired && (
+              <TextField
+                size="small"
+                label="API Key"
+                type={showKey ? "text" : "password"}
+                value={apiKey}
+                onChange={e => setApiKey(e.target.value)}
+                placeholder="sk-…"
+                slotProps={{
+                  input: {
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton size="small" onClick={() => setShowKey(v => !v)} edge="end">
+                          {showKey ? <VisibilityOffIcon sx={{ fontSize: 14 }} /> : <VisibilityIcon sx={{ fontSize: 14 }} />}
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                    sx: { fontSize: 12, fontFamily: "monospace" },
+                  },
+                  inputLabel: { sx: { fontSize: 12 } },
+                }}
+                fullWidth
+              />
+            )}
+
+            {saveErr && (
+              <Typography sx={{ color: "error.main", fontSize: 11 }}>{saveErr}</Typography>
+            )}
+
+            <Button
+              variant="contained"
+              size="small"
+              onClick={handleApply}
+              disabled={saving || !selectedModel || (keyRequired && !apiKey)}
+              sx={{ textTransform: "none", fontSize: 12, borderRadius: "9px", py: 0.8 }}
+            >
+              {saving ? "Applying…" : "Apply"}
+            </Button>
+          </Box>
+        </Collapse>
       </Box>
 
       <Box sx={{ mx: 3, borderBottom: "1px solid", borderBottomColor: "divider" }} />
@@ -146,7 +292,6 @@ export default function Sidebar({ projectId, onKBChange, refreshKey = 0 }: Sideb
 
         {projectUsage ? (
           <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
-            {/* Input tokens */}
             <Box>
               <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.6 }}>
                 <Typography sx={{ color: "text.secondary", fontSize: 11 }}>Input</Typography>
@@ -159,7 +304,6 @@ export default function Sidebar({ projectId, onKBChange, refreshKey = 0 }: Sideb
               </Box>
             </Box>
 
-            {/* Output tokens */}
             <Box>
               <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.6 }}>
                 <Typography sx={{ color: "text.secondary", fontSize: 11 }}>Output</Typography>
@@ -172,7 +316,6 @@ export default function Sidebar({ projectId, onKBChange, refreshKey = 0 }: Sideb
               </Box>
             </Box>
 
-            {/* Cost breakdown */}
             {projectUsage.cost ? (
               <Box sx={{ mt: 0.5, p: 1.5, borderRadius: "10px", bgcolor: "background.default", border: "1px solid", borderColor: "divider" }}>
                 {[

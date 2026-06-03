@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
     DEBUG: bool = True
+    # Comma-separated allowed CORS origins. Empty = localhost defaults.
+    ALLOWED_ORIGINS: str = ""
+    # Base directory for all persistent data (projects, analyses, vectors, graph).
+    # Set to a mounted disk path in production (e.g. /var/data).
+    DATA_DIR: str = ""
 
     # Processing
     CHUNK_SIZE: int = 500
