@@ -1,8 +1,16 @@
-# QA Intelligence — Three-Brain Architecture
+# QA Intelligence
 
-An AI-powered QA test plan generator that **thinks** before generating tests.
-It combines a Knowledge Graph, a RAG Engine, and an LLM pipeline to produce
-structured, traceable, risk-driven QA outputs — all running **fully local**.
+AI-powered QA test generation platform using a three-brain architecture
+(RAG + Knowledge Graph + LLM) to produce structured, traceable, risk-driven test plans.
+
+> **This repository is the parent project.** Source code lives in the repos below.
+
+## Repositories
+
+| Repo | Description |
+|------|-------------|
+| [QA-Inteligence-API](https://github.com/sudharshanShanmugam/QA-Inteligence-API) | FastAPI backend — RAG engine, LLM test generation, MongoDB persistence |
+| [QA-Inteligence-Frontend](https://github.com/sudharshanShanmugam/QA-Inteligence-Frontend) | Next.js frontend — project dashboard, analysis UI, chat assistant |
 
 ---
 
