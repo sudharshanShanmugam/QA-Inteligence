@@ -85,6 +85,10 @@ backend/chroma_db/
 *.sqlite
 *.sqlite3
 
+# Build artifacts
+*.tsbuildinfo
+frontend/web/.next/
+
 # Uploaded / temp files
 uploads/
 tmp/

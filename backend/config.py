@@ -5,10 +5,14 @@ _ENV_FILE = Path(__file__).parent.parent / ".env"
 
 
 class Settings(BaseSettings):
+    # MongoDB
+    MONGODB_URI: str = ""
+    MONGODB_DB_NAME: str = "qa_intelligence"
+
     # DeepInfra
     DEEPINFRA_API_KEY: str = ""
     DEEPINFRA_BASE_URL: str = "https://api.deepinfra.com/v1/openai"
-    LLM_MODEL: str = "openai/gpt-oss-120b-Turbo"
+    LLM_MODEL: str = "meta-llama/Llama-3.3-70B-Instruct"
     EMBED_MODEL: str = "BAAI/bge-large-en-v1.5"
     ENTITY_MODEL: str = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 

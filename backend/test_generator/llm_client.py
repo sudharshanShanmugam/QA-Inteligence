@@ -186,6 +186,7 @@ class LLMClient:
             openai_api_base=self._base_url_override or settings.DEEPINFRA_BASE_URL,
             model=self._model_override or settings.LLM_MODEL,
             temperature=temperature,
+            max_tokens=4096,
             seed=42,
             timeout=60,
             max_retries=0,  # no internal SDK retry; generate() handles its own retry logic

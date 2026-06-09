@@ -16,9 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, Request, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -40,21 +40,33 @@ app = FastAPI(title="QA Intelligence API", version="1.0.0")
 def _cors_origins() -> list:
     if settings.ALLOWED_ORIGINS:
         return [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
-    return ["http://localhost:1111", "http://localhost:2222"]
+    # Dev fallback — overridden via ALLOWED_ORIGINS in production
+    return ["http://localhost:1111", "http://localhost:2222", "http://localhost:3000"]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Accept"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response: Response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 _graph_lock = threading.Lock()
 
 # ── Pricing table ────────────────────────────────────────────────────────────
 _PRICING: Dict[str, tuple] = {
-    "openai/gpt-oss-120b-Turbo":               (0.80, 2.40),
+    "meta-llama/Llama-3.3-70B-Instruct":       (0.23, 0.40),
     "meta-llama/Meta-Llama-3.1-8B-Instruct":   (0.06, 0.06),
     "meta-llama/Meta-Llama-3.1-70B-Instruct":  (0.52, 0.75),
     "meta-llama/Meta-Llama-3.1-405B-Instruct": (2.70, 2.70),
@@ -78,7 +90,7 @@ _PROVIDERS: Dict[str, Any] = {
         "base_url": "https://api.deepinfra.com/v1/openai",
         "key_required": True,
         "models": [
-            "openai/gpt-oss-120b-Turbo",
+            "meta-llama/Llama-3.3-70B-Instruct",
             "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "meta-llama/Meta-Llama-3.1-70B-Instruct",
             "meta-llama/Meta-Llama-3.1-405B-Instruct",
@@ -185,19 +197,32 @@ def _ingest_file(file_bytes: bytes, filename: str, doc_type: str) -> dict:
 # ── Analysis History Manager ─────────────────────────────────────────────────
 
 class AnalysisHistoryManager:
-    """Persists per-project analysis history as JSON files on disk."""
+    """Persists per-project analysis history.
+
+    Uses MongoDB when MONGODB_URI is configured; falls back to JSON files on disk.
+    """
 
     def __init__(self):
-        self._lock = threading.Lock()
-        base = Path(settings.DATA_DIR) if settings.DATA_DIR else Path(__file__).parent / "data"
-        self._dir = base / "analyses"
-        self._dir.mkdir(parents=True, exist_ok=True)
+        from db.mongo_client import get_db
+        db = get_db()
+        if db is not None:
+            from db.repositories import AnalysisRepository
+            self._repo = AnalysisRepository(db["analyses"])
+            self._mode = "mongo"
+        else:
+            self._mode = "file"
+            self._lock = threading.Lock()
+            base = Path(settings.DATA_DIR) if settings.DATA_DIR else Path(__file__).parent / "data"
+            self._dir = base / "analyses"
+            self._dir.mkdir(parents=True, exist_ok=True)
 
-    def _path(self, project_id: str) -> Path:
+    # ── file helpers ──────────────────────────────────────────────────────────
+
+    def _fpath(self, project_id: str) -> Path:
         return self._dir / f"{project_id}.json"
 
-    def _load(self, project_id: str) -> List[Dict]:
-        p = self._path(project_id)
+    def _fload(self, project_id: str) -> List[Dict]:
+        p = self._fpath(project_id)
         if not p.exists():
             return []
         try:
@@ -205,13 +230,16 @@ class AnalysisHistoryManager:
         except Exception:
             return []
 
-    def _save_all(self, project_id: str, entries: List[Dict]) -> None:
-        self._path(project_id).write_text(
-            json.dumps(entries, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+    def _fsave(self, project_id: str, entries: List[Dict]) -> None:
+        self._fpath(project_id).write_text(
+            json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+    # ── public API ────────────────────────────────────────────────────────────
+
     def save(self, project_id: str, story: str, result: Dict) -> Dict:
+        if self._mode == "mongo":
+            return self._repo.save(project_id, story, result)
         entry = {
             "id": uuid.uuid4().hex[:12],
             "story": story,
@@ -219,32 +247,72 @@ class AnalysisHistoryManager:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         with self._lock:
-            entries = self._load(project_id)
-            entries.insert(0, entry)          # newest first
-            self._save_all(project_id, entries)
+            entries = self._fload(project_id)
+            entries.insert(0, entry)
+            self._fsave(project_id, entries)
         return entry
 
     def list(self, project_id: str) -> List[Dict]:
+        if self._mode == "mongo":
+            return self._repo.list(project_id)
         with self._lock:
-            return self._load(project_id)
+            return self._fload(project_id)
 
     def delete_one(self, project_id: str, analysis_id: str) -> bool:
+        if self._mode == "mongo":
+            return self._repo.delete_one(project_id, analysis_id)
         with self._lock:
-            entries = self._load(project_id)
+            entries = self._fload(project_id)
             new_entries = [e for e in entries if e["id"] != analysis_id]
             if len(new_entries) == len(entries):
                 return False
-            self._save_all(project_id, new_entries)
+            self._fsave(project_id, new_entries)
             return True
 
     def delete_all(self, project_id: str) -> None:
+        if self._mode == "mongo":
+            self._repo.delete_all(project_id)
+            return
         with self._lock:
-            p = self._path(project_id)
+            p = self._fpath(project_id)
             if p.exists():
                 p.unlink()
 
 
 analysis_history = AnalysisHistoryManager()
+
+
+# ── Ingested Document Tracker ────────────────────────────────────────────────
+
+class DocumentTracker:
+    """Tracks ingested document metadata in MongoDB (no-op when MongoDB is off)."""
+
+    def __init__(self):
+        from db.mongo_client import get_db
+        db = get_db()
+        if db is not None:
+            from db.repositories import DocumentRepository
+            self._repo = DocumentRepository(db["ingested_documents"])
+            self._enabled = True
+        else:
+            self._enabled = False
+
+    def save(self, project_id: str, filename: str, doc_type: str, ingest_result: dict) -> Optional[dict]:
+        if not self._enabled:
+            return None
+        return self._repo.save(project_id, filename, doc_type, ingest_result)
+
+    def list(self, project_id: str) -> List[dict]:
+        if not self._enabled:
+            return []
+        return self._repo.list(project_id)
+
+    def delete_all(self, project_id: str) -> None:
+        if self._enabled:
+            self._repo.delete_all(project_id)
+
+
+document_tracker = DocumentTracker()
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -458,6 +526,9 @@ def delete_project(project_id: str):
         vs.clear()
     except Exception:
         pass
+    # Clear MongoDB-backed data for this project
+    analysis_history.delete_all(project_id)
+    document_tracker.delete_all(project_id)
     ok = project_manager.delete(project_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -493,6 +564,9 @@ def clear_project_kb(project_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB per file
+
+
 @app.post("/api/projects/{project_id}/ingest")
 async def project_ingest(
     project_id: str,
@@ -503,14 +577,29 @@ async def project_ingest(
         raise HTTPException(status_code=404, detail="Project not found")
     from rag_engine.vector_store import get_vector_store
     project_store = get_vector_store(project_id)
-    file_payloads = [(f.filename, await f.read()) for f in files]
+    file_payloads = []
+    for f in files:
+        data = await f.read()
+        if len(data) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail=f"{f.filename} exceeds 20 MB limit")
+        file_payloads.append((f.filename, data))
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
             executor.submit(_ingest_file_to_store, data, filename, doc_type, project_store)
             for filename, data in file_payloads
         ]
         results = [f.result() for f in futures]
+    # Persist document metadata to MongoDB (no-op if MongoDB is not configured)
+    for (filename, _), result in zip(file_payloads, results):
+        document_tracker.save(project_id, filename, doc_type, result)
     return {"results": results}
+
+
+@app.get("/api/projects/{project_id}/documents")
+def list_project_documents(project_id: str):
+    if not project_manager.get(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"documents": document_tracker.list(project_id)}
 
 import re as _re
 
