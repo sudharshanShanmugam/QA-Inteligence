@@ -1,0 +1,1959 @@
+[
+  {
+    "id": "cf63faa71e8e",
+    "story": "admin login and authentication  screen test cases ",
+    "result": {
+      "feature_understanding": "The admin login and authentication screen lets administrators sign in so they can access the admin dashboard and manage the system. A critical rule is that any attempt to open an admin URL without a valid session must redirect the user to the login page. This screen connects to the POST /api/admin/auth/login (and related auth) endpoints to verify credentials. The biggest risk is that the authentication check could fail, allowing unauthorized access or keeping a session alive past its timeout. Test also needs to confirm that an idle admin session expires and the user is sent back to the login screen.",
+      "impacted_modules": [],
+      "event_flow": [
+        {
+          "step": 1,
+          "layer": "UI",
+          "component": "admin login and authentication screen test — User Interface",
+          "action": "User fills in the form and submits, or clicks the action button to trigger the operation",
+          "data": "Form input data entered by the user",
+          "validation_point": "Client-side validation runs before the request is sent — required fields are filled, formats are correct, and a loading indicator appears. Input is sanitised to prevent malformed data reaching the server."
+        },
+        {
+          "step": 2,
+          "layer": "API",
+          "component": "POST /api/admin/auth/login",
+          "action": "The server receives the POST request, verifies the caller's identity, and parses the incoming payload",
+          "data": "Validated request body and any query parameters",
+          "validation_point": "The authentication token is present and has not expired. The request body matches the expected schema (no missing required fields, correct data types). The caller has not exceeded their rate limit. Business rules are enforced before any data is written."
+        },
+        {
+          "step": 3,
+          "layer": "API",
+          "component": "POST /api/admin/auth/logout",
+          "action": "The server receives the POST request, verifies the caller's identity, and parses the incoming payload",
+          "data": "Validated request body and any query parameters",
+          "validation_point": "The authentication token is present and has not expired. The request body matches the expected schema (no missing required fields, correct data types). The caller has not exceeded their rate limit. Business rules are enforced before any data is written."
+        },
+        {
+          "step": 4,
+          "layer": "API",
+          "component": "POST /api/admin/auth/refresh",
+          "action": "The server receives the POST request, verifies the caller's identity, and parses the incoming payload",
+          "data": "Validated request body and any query parameters",
+          "validation_point": "The authentication token is present and has not expired. The request body matches the expected schema (no missing required fields, correct data types). The caller has not exceeded their rate limit. Business rules are enforced before any data is written."
+        },
+        {
+          "step": 5,
+          "layer": "DB",
+          "component": "Database — persistence layer",
+          "action": "The operation's data is saved to or retrieved from the database",
+          "data": "The entity being created, updated, or deleted",
+          "validation_point": "The record is stored with all required fields populated correctly. Uniqueness and referential integrity constraints are respected. Any error causes a full rollback, leaving no partial or corrupt data behind."
+        },
+        {
+          "step": 6,
+          "layer": "Event",
+          "component": "Message broker (Kafka / RabbitMQ / SQS)",
+          "action": "After a successful database write, a domain event is published to inform other services of the state change",
+          "data": "Event payload containing the updated entity data and a correlation ID",
+          "validation_point": "Event is published only after the database transaction commits (outbox pattern). No event is emitted if the transaction fails. Failed deliveries are routed to a dead-letter queue for investigation."
+        },
+        {
+          "step": 7,
+          "layer": "Consumer",
+          "component": "Event consumer / background worker service",
+          "action": "The downstream service receives the event and applies any follow-on business logic",
+          "data": "Consumed event payload",
+          "validation_point": "Processing is idempotent — running the same event twice produces the same result. Failures trigger retries and ultimately land in a dead-letter queue. Message ordering is preserved where the business logic requires it."
+        },
+        {
+          "step": 8,
+          "layer": "Notification",
+          "component": "Notification service (email / push / SMS / webhook)",
+          "action": "The user or an external system is informed of the operation outcome",
+          "data": "Notification message containing the action result",
+          "validation_point": "The notification is sent to the correct recipient only. The right template and channel are used for the event type. No duplicate notifications are sent if the event is retried. No personal or sensitive data is exposed in the notification body or subject line."
+        }
+      ],
+      "failure_path_tests": [
+        {
+          "id": "FLOW-FAIL-001",
+          "type": "event_flow_failure",
+          "scenario_type": "negative",
+          "failure_class": "api_timeout",
+          "title": "API timeout: POST /api/admin/auth/login exceeds SLA",
+          "description": "Simulate POST /api/admin/auth/login taking longer than the SLA threshold (e.g. 30 s). Verify the client receives a meaningful timeout error and the operation does not partially commit.",
+          "steps": [
+            "Configure POST /api/admin/auth/login to respond after 30 s (mock/stub)",
+            "Trigger the feature flow",
+            "Verify the caller receives HTTP 504 or an explicit timeout error",
+            "Verify no partial data was written to the database",
+            "Verify a retry or circuit-breaker mechanism activates if configured"
+          ],
+          "expected_result": "Caller gets a safe timeout error; no partial state change; circuit breaker trips after N failures",
+          "risk_level": "high"
+        },
+        {
+          "id": "FLOW-FAIL-002",
+          "type": "event_flow_failure",
+          "scenario_type": "negative",
+          "failure_class": "api_timeout",
+          "title": "API timeout: POST /api/admin/auth/logout exceeds SLA",
+          "description": "Simulate POST /api/admin/auth/logout taking longer than the SLA threshold (e.g. 30 s). Verify the client receives a meaningful timeout error and the operation does not partially commit.",
+          "steps": [
+            "Configure POST /api/admin/auth/logout to respond after 30 s (mock/stub)",
+            "Trigger the feature flow",
+            "Verify the caller receives HTTP 504 or an explicit timeout error",
+            "Verify no partial data was written to the database",
+            "Verify a retry or circuit-breaker mechanism activates if configured"
+          ],
+          "expected_result": "Caller gets a safe timeout error; no partial state change; circuit breaker trips after N failures",
+          "risk_level": "high"
+        },
+        {
+          "id": "FLOW-FAIL-003",
+          "type": "event_flow_failure",
+          "scenario_type": "negative",
+          "failure_class": "api_timeout",
+          "title": "API timeout: POST /api/admin/auth/refresh exceeds SLA",
+          "description": "Simulate POST /api/admin/auth/refresh taking longer than the SLA threshold (e.g. 30 s). Verify the client receives a meaningful timeout error and the operation does not partially commit.",
+          "steps": [
+            "Configure POST /api/admin/auth/refresh to respond after 30 s (mock/stub)",
+            "Trigger the feature flow",
+            "Verify the caller receives HTTP 504 or an explicit timeout error",
+            "Verify no partial data was written to the database",
+            "Verify a retry or circuit-breaker mechanism activates if configured"
+          ],
+          "expected_result": "Caller gets a safe timeout error; no partial state change; circuit breaker trips after N failures",
+          "risk_level": "high"
+        },
+        {
+          "id": "FLOW-FAIL-004",
+          "type": "event_flow_failure",
+          "scenario_type": "negative",
+          "failure_class": "circuit_breaker",
+          "title": "Circuit breaker opens after repeated failures on /api/admin/auth/login",
+          "description": "Repeatedly fail the downstream dependency to trigger the circuit breaker. Verify open-state fast-fail behaviour and eventual half-open recovery.",
+          "steps": [
+            "Cause /api/admin/auth/login to return 500 for 5 consecutive calls",
+            "Verify the circuit breaker moves to OPEN state",
+            "Verify subsequent calls fail fast (< 100 ms) without hitting the dependency",
+            "Wait for the cooldown window, then send one request",
+            "Verify the circuit breaker enters HALF-OPEN and allows the probe request",
+            "Verify recovery to CLOSED state on a successful probe"
+          ],
+          "expected_result": "Circuit breaker opens, fast-fails, and recovers correctly",
+          "risk_level": "high"
+        },
+        {
+          "id": "FLOW-FAIL-005",
+          "type": "event_flow_failure",
+          "scenario_type": "negative",
+          "failure_class": "db_failure_rollback",
+          "title": "admin login and authentication screen test: DB failure mid-transaction rolls back cleanly",
+          "description": "Simulate a DB constraint violation or connection drop mid-transaction. Verify the entire operation rolls back and no event is published.",
+          "steps": [
+            "Begin the feature operation",
+            "Inject a DB failure (constraint violation or connection timeout) after the first INSERT",
+            "Verify the DB transaction is fully rolled back",
+            "Verify NO domain event was published to the message broker",
+            "Verify the API returns a 500 with a safe error message (no SQL in response)"
+          ],
+          "expected_result": "Full rollback; no partial data; no spurious event published; safe error response",
+          "risk_level": "high"
+        },
+        {
+          "id": "FLOW-FAIL-006",
+          "type": "event_flow_failure",
+          "scenario_type": "negative",
+          "failure_class": "idempotency",
+          "title": "Duplicate POST /api/admin/auth/login request is idempotent",
+          "description": "Send the same POST /api/admin/auth/login request twice with an identical idempotency key. Verify the second call returns the same result without creating a duplicate record or publishing a second event.",
+          "steps": [
+            "Send POST /api/admin/auth/login with idempotency key 'KEY-001'",
+            "Verify the first call succeeds and creates the resource",
+            "Send the identical POST /api/admin/auth/login again with the same 'KEY-001' key",
+            "Verify the second call returns the same response (200/201) without a new DB record",
+            "Verify only ONE domain event was published total"
+          ],
+          "expected_result": "Second call is a no-op; exactly one DB record; exactly one event published",
+          "risk_level": "high"
+        }
+      ],
+      "risk_areas": [
+        {
+          "feature": "Admin authentication end-to-end flow",
+          "module": "Authentication",
+          "risk_score": 0.5,
+          "priority": "P2",
+          "reasons": [
+            "Authentication data (credentials, tokens) is highly sensitive (+0.20)",
+            "Multiple unauthenticated endpoints (login, refresh, me) increase attack surface (+0.15)",
+            "Integration of 3+ APIs (login, refresh, me) adds complexity (+0.15)"
+          ],
+          "past_bug_count": 0,
+          "bug_cluster": null,
+          "failure_propagation": "If authentication fails, admins cannot access any admin UI, affecting all admin users and downstream services that rely on a valid auth token.",
+          "peak_time_risk": "high"
+        },
+        {
+          "feature": "Admin login endpoint (POST /api/admin/auth/login)",
+          "module": "Authentication",
+          "risk_score": 0.35,
+          "priority": "P3",
+          "reasons": [
+            "Handles sensitive admin credentials (+0.20)",
+            "Unauthenticated endpoint accepts user input (username/password) (+0.15)"
+          ],
+          "past_bug_count": 0,
+          "bug_cluster": null,
+          "failure_propagation": "Login failure blocks admin access, halting all admin operations and any actions requiring admin privileges.",
+          "peak_time_risk": "high"
+        },
+        {
+          "feature": "Admin token refresh endpoint (POST /api/admin/auth/refresh)",
+          "module": "Authentication",
+          "risk_score": 0.35,
+          "priority": "P3",
+          "reasons": [
+            "Refresh deals with auth tokens, which are security‑critical (+0.20)",
+            "Unauthenticated endpoint processes refresh token input (+0.15)"
+          ],
+          "past_bug_count": 0,
+          "bug_cluster": null,
+          "failure_propagation": "Refresh failure invalidates the session, causing admins to be logged out and interrupting ongoing admin tasks.",
+          "peak_time_risk": "medium"
+        },
+        {
+          "feature": "Admin session info endpoint (GET /api/admin/auth/me)",
+          "module": "Authentication",
+          "risk_score": 0.35,
+          "priority": "P3",
+          "reasons": [
+            "Exposes personal admin data (profile) (+0.20)",
+            "Unauthenticated call with token input adds attack surface (+0.15)"
+          ],
+          "past_bug_count": 0,
+          "bug_cluster": null,
+          "failure_propagation": "If /me fails, UI cannot display admin profile, causing errors in components that rely on user information.",
+          "peak_time_risk": "low"
+        },
+        {
+          "feature": "Admin forgot‑password endpoint (POST /api/admin/auth/forgot-password)",
+          "module": "Authentication",
+          "risk_score": 0.35,
+          "priority": "P3",
+          "reasons": [
+            "Handles personal email addresses for password recovery (+0.20)",
+            "Unauthenticated endpoint accepts email input (+0.15)"
+          ],
+          "past_bug_count": 0,
+          "bug_cluster": null,
+          "failure_propagation": "Failure prevents admins from initiating password recovery, leading to possible lockout of admin accounts.",
+          "peak_time_risk": "medium"
+        },
+        {
+          "feature": "Admin reset‑password endpoint (POST /api/admin/auth/reset-password)",
+          "module": "Authentication",
+          "risk_score": 0.35,
+          "priority": "P3",
+          "reasons": [
+            "Processes new admin passwords, a highly sensitive operation (+0.20)",
+            "Unauthenticated endpoint receives reset token and new password (+0.15)"
+          ],
+          "past_bug_count": 0,
+          "bug_cluster": null,
+          "failure_propagation": "Failure blocks password changes, potentially leaving compromised accounts unmitigated.",
+          "peak_time_risk": "medium"
+        },
+        {
+          "feature": "Admin logout endpoint (POST /api/admin/auth/logout)",
+          "module": "Authentication",
+          "risk_score": 0.35,
+          "priority": "P3",
+          "reasons": [
+            "Invalidates session tokens, critical for security (+0.20)",
+            "Unauthenticated call may be invoked without proper auth (+0.15)"
+          ],
+          "past_bug_count": 0,
+          "bug_cluster": null,
+          "failure_propagation": "Logout failure may leave stale sessions active, increasing risk of unauthorized access after admin attempts to sign out.",
+          "peak_time_risk": "low"
+        }
+      ],
+      "heads_up_warnings": [],
+      "test_scenarios": [
+        {
+          "id": "TC-FUNC-001",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Successful admin login with valid credentials",
+          "description": "Successful admin login with valid credentials",
+          "preconditions": [
+            "Browser is open"
+          ],
+          "steps": [
+            "Go to the login screen",
+            "Fill in the username field with admin_user",
+            "Fill in the password field with CorrectPass123!",
+            "Click the Login button"
+          ],
+          "expected_result": "Redirected to the Admin dashboard screen",
+          "risk_level": "high",
+          "traceability": "Risk area: Admin login endpoint (POST /api/admin/auth/login) handles sensitive admin credentials",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-002",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Admin login fails when username is empty",
+          "description": "Admin login fails when username is empty",
+          "preconditions": [
+            "Browser is open"
+          ],
+          "steps": [
+            "Go to the login screen",
+            "Fill in the username field with (leave empty)",
+            "Fill in the password field with CorrectPass123!",
+            "Click the Login button"
+          ],
+          "expected_result": "Access denied and remains on the login screen",
+          "risk_level": "high",
+          "traceability": "BUG136 | Admin dashboard accessible without auth – Expected behaviour is access denied",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-003",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Admin login fails when password is empty",
+          "description": "Admin login fails when password is empty",
+          "preconditions": [
+            "Browser is open"
+          ],
+          "steps": [
+            "Go to the login screen",
+            "Fill in the username field with admin_user",
+            "Fill in the password field with (leave empty)",
+            "Click the Login button"
+          ],
+          "expected_result": "Access denied and remains on the login screen",
+          "risk_level": "high",
+          "traceability": "BUG136 | Admin dashboard accessible without auth – Expected behaviour is access denied",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-004",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "SQL injection attempt in username field is rejected",
+          "description": "SQL injection attempt in username field is rejected",
+          "preconditions": [
+            "Browser is open"
+          ],
+          "steps": [
+            "Go to the login screen",
+            "Fill in the username field with ' OR 1=1; --",
+            "Fill in the password field with anyvalue",
+            "Click the Login button"
+          ],
+          "expected_result": "Input sanitised; login fails and user stays on the login screen",
+          "risk_level": "high",
+          "traceability": "BUG138 | SQL injection in My Bookings search – Input sanitised",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-005",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "XSS payload in Full Name field is neutralised",
+          "description": "XSS payload in Full Name field is neutralised",
+          "preconditions": [
+            "User is logged in as Admin",
+            "The Admin dashboard screen is open"
+          ],
+          "steps": [
+            "Go to the Admin dashboard screen",
+            "Fill in the Full Name field with <img src=x onerror=alert(1)>",
+            "Click the Save button"
+          ],
+          "expected_result": "Input sanitised; no alert box executes",
+          "risk_level": "high",
+          "traceability": "BUG137 | XSS possible in Full Name field – Input sanitised; no execution",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-006",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Non‑admin user is redirected to login when accessing admin URL directly",
+          "description": "Non‑admin user is redirected to login when accessing admin URL directly",
+          "preconditions": [
+            "Browser is open",
+            "No admin session exists"
+          ],
+          "steps": [
+            "Go to the /admin URL directly"
+          ],
+          "expected_result": "Redirected to the login screen",
+          "risk_level": "high",
+          "traceability": "TC193 | Admin pages inaccessible without auth – Redirected to login",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-007",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Admin session expires after configured inactivity timeout",
+          "description": "Admin session expires after configured inactivity timeout",
+          "preconditions": [
+            "User is logged in as Admin",
+            "The Admin dashboard screen is open"
+          ],
+          "steps": [
+            "Leave the session idle for the configured timeout period"
+          ],
+          "expected_result": "Session expired; redirected to the login screen",
+          "risk_level": "high",
+          "traceability": "TC199 | Admin session expires after inactivity – Session expired; redirected to login",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-008",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Admin can navigate to All Registrations page from the dashboard",
+          "description": "Admin can navigate to All Registrations page from the dashboard",
+          "preconditions": [
+            "User is logged in as Admin",
+            "The Admin dashboard screen is open"
+          ],
+          "steps": [
+            "Click the All Registrations navigation link"
+          ],
+          "expected_result": "All Registrations page loads",
+          "risk_level": "medium",
+          "traceability": "TC125 | All Registrations accessible from nav – Page loads",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-009",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Non‑admin user receives access denied when opening All Registrations via URL",
+          "description": "Non‑admin user receives access denied when opening All Registrations via URL",
+          "preconditions": [
+            "Browser is open",
+            "No admin session exists"
+          ],
+          "steps": [
+            "Go to the All Registrations page URL directly"
+          ],
+          "expected_result": "Access denied message displayed",
+          "risk_level": "high",
+          "traceability": "BUG096 | Non-admin accesses page via URL – Access denied",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-010",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Export button on All Registrations downloads non‑empty data file",
+          "description": "Export button on All Registrations downloads non‑empty data file",
+          "preconditions": [
+            "User is logged in as Admin",
+            "All Registrations page is open"
+          ],
+          "steps": [
+            "Click the Export button"
+          ],
+          "expected_result": "Data file is downloaded and contains registration records",
+          "risk_level": "medium",
+          "traceability": "BUG094 | Export downloads empty file – Expected data downloaded",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-011",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Pagination works on All Registrations page",
+          "description": "Pagination works on All Registrations page",
+          "preconditions": [
+            "User is logged in as Admin",
+            "All Registrations page is open"
+          ],
+          "steps": [
+            "Click page 2 in the pagination control"
+          ],
+          "expected_result": "Page 2 records are shown",
+          "risk_level": "medium",
+          "traceability": "BUG095 | Pagination not working – Page 2 records shown",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-012",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Location filter on All Registrations shows only selected location records",
+          "description": "Location filter on All Registrations shows only selected location records",
+          "preconditions": [
+            "User is logged in as Admin",
+            "All Registrations page is open"
+          ],
+          "steps": [
+            "Apply the Location filter for Thiruvanmiyur"
+          ],
+          "expected_result": "Only Thiruvanmiyur records are displayed",
+          "risk_level": "medium",
+          "traceability": "BUG097 | Location filter shows records from other locations – Only Thiruvanmiyur shown",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-013",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Approve button disappears after payment approval and page reload",
+          "description": "Approve button disappears after payment approval and page reload",
+          "preconditions": [
+            "User is logged in as Admin",
+            "Verify Payment page is open"
+          ],
+          "steps": [
+            "Click the Approve button",
+            "Reload the page"
+          ],
+          "expected_result": "Approve button is not visible",
+          "risk_level": "high",
+          "traceability": "BUG113 | Approve button still shown after approval – Buttons hidden after decision",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-014",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Verified count increments after a payment is verified",
+          "description": "Verified count increments after a payment is verified",
+          "preconditions": [
+            "User is logged in as Admin",
+            "Verify Payment page is open"
+          ],
+          "steps": [
+            "Perform a verification action on a payment record",
+            "Check the Verified card count"
+          ],
+          "expected_result": "Verified count increments by 1",
+          "risk_level": "high",
+          "traceability": "BUG114 | Verified count not updating after approval – Count increments",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-015",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Upload area accepts a JPG file",
+          "description": "Upload area accepts a JPG file",
+          "preconditions": [
+            "User is logged in as Admin",
+            "Payment page is open"
+          ],
+          "steps": [
+            "Click the upload area",
+            "Select a JPG file from the file browser"
+          ],
+          "expected_result": "File is accepted and displayed on the page",
+          "risk_level": "high",
+          "traceability": "TC059 | JPG file accepted – File accepted and displayed",
+          "kb_grounded": true
+        },
+        {
+          "id": "TC-FUNC-016",
+          "type": "functional",
+          "scenario_type": "functional",
+          "title": "Upload area accepts a PDF file",
+          "description": "Upload area accepts a PDF file",
+          "preconditions": [
+            "User is logged in as Admin",
+            "Payment page is open"
+          ],
+          "steps": [
+            "Click the upload area",
+            "Select a PDF file from the file browser"
+          ],
+          "expected_result": "File is accepted and displayed on the page",
+          "risk_level": "high",
+          "traceability": "TC061 | PDF file accepted – File accepted and displayed",
+          "kb_grounded": true
+        },
+        {
+          "id": "PW-001",
+          "type": "pairwise",
+          "scenario_type": "functional",
+          "title": "Combination test — user role = admin, admin session = expires after inactivity, viewport = Mobile viewport, login state = admin logged in, export result = Data downloaded",
+          "description": "Covers all 3-way interactions among: ['user role', 'admin session', 'viewport', 'login state', 'export result']",
+          "preconditions": [
+            "The application is open and the relevant screen is loaded"
+          ],
+          "steps": [
+            "Select or enter 'admin' for the 'user role' field",
+            "Select or enter 'expires after inactivity' for the 'admin session' field",
+            "Select or enter 'Mobile viewport' for the 'viewport' field",
+            "Select or enter 'admin logged in' for the 'login state' field",
+            "Select or enter 'Data downloaded' for the 'export result' field",
+            "Submit the form with the settings above",
+            "Observe the result and verify no errors or unexpected behaviour appear"
+          ],
+          "expected_result": "System handles combination correctly",
+          "risk_level": "medium",
+          "traceability": "Pairwise testing — validates that this specific parameter combination works correctly"
+        },
+        {
+          "id": "PW-002",
+          "type": "pairwise",
+          "scenario_type": "functional",
+          "title": "Combination test — user role = Non-admin, admin session = expires after inactivity, viewport = Mobile viewport, login state = No admin session, export result = Empty file",
+          "description": "Covers all 3-way interactions among: ['user role', 'admin session', 'viewport', 'login state', 'export result']",
+          "preconditions": [
+            "The application is open and the relevant screen is loaded"
+          ],
+          "steps": [
+            "Select or enter 'Non-admin' for the 'user role' field",
+            "Select or enter 'expires after inactivity' for the 'admin session' field",
+            "Select or enter 'Mobile viewport' for the 'viewport' field",
+            "Select or enter 'No admin session' for the 'login state' field",
+            "Select or enter 'Empty file' for the 'export result' field",
+            "Submit the form with the settings above",
+            "Observe the result and verify no errors or unexpected behaviour appear"
+          ],
+          "expected_result": "System handles combination correctly",
+          "risk_level": "medium",
+          "traceability": "Pairwise testing — validates that this specific parameter combination works correctly"
+        },
+        {
+          "id": "PW-003",
+          "type": "pairwise",
+          "scenario_type": "functional",
+          "title": "Combination test — user role = admin, admin session = not expiring, viewport = 320px wide screen, login state = admin logged in, export result = Empty file",
+          "description": "Covers all 3-way interactions among: ['user role', 'admin session', 'viewport', 'login state', 'export result']",
+          "preconditions": [
+            "The application is open and the relevant screen is loaded"
+          ],
+          "steps": [
+            "Select or enter 'admin' for the 'user role' field",
+            "Select or enter 'not expiring' for the 'admin session' field",
+            "Select or enter '320px wide screen' for the 'viewport' field",
+            "Select or enter 'admin logged in' for the 'login state' field",
+            "Select or enter 'Empty file' for the 'export result' field",
+            "Submit the form with the settings above",
+            "Observe the result and verify no errors or unexpected behaviour appear"
+          ],
+          "expected_result": "System handles combination correctly",
+          "risk_level": "medium",
+          "traceability": "Pairwise testing — validates that this specific parameter combination works correctly"
+        },
+        {
+          "id": "PW-004",
+          "type": "pairwise",
+          "scenario_type": "functional",
+          "title": "Combination test — user role = Non-admin, admin session = not expiring, viewport = 320px wide screen, login state = No admin session, export result = Data downloaded",
+          "description": "Covers all 3-way interactions among: ['user role', 'admin session', 'viewport', 'login state', 'export result']",
+          "preconditions": [
+            "The application is open and the relevant screen is loaded"
+          ],
+          "steps": [
+            "Select or enter 'Non-admin' for the 'user role' field",
+            "Select or enter 'not expiring' for the 'admin session' field",
+            "Select or enter '320px wide screen' for the 'viewport' field",
+            "Select or enter 'No admin session' for the 'login state' field",
+            "Select or enter 'Data downloaded' for the 'export result' field",
+            "Submit the form with the settings above",
+            "Observe the result and verify no errors or unexpected behaviour appear"
+          ],
+          "expected_result": "System handles combination correctly",
+          "risk_level": "medium",
+          "traceability": "Pairwise testing — validates that this specific parameter combination works correctly"
+        },
+        {
+          "id": "PW-005",
+          "type": "pairwise",
+          "scenario_type": "functional",
+          "title": "Combination test — user role = admin, admin session = not expiring, viewport = Mobile viewport, login state = No admin session, export result = Empty file",
+          "description": "Covers all 3-way interactions among: ['user role', 'admin session', 'viewport', 'login state', 'export result']",
+          "preconditions": [
+            "The application is open and the relevant screen is loaded"
+          ],
+          "steps": [
+            "Select or enter 'admin' for the 'user role' field",
+            "Select or enter 'not expiring' for the 'admin session' field",
+            "Select or enter 'Mobile viewport' for the 'viewport' field",
+            "Select or enter 'No admin session' for the 'login state' field",
+            "Select or enter 'Empty file' for the 'export result' field",
+            "Submit the form with the settings above",
+            "Observe the result and verify no errors or unexpected behaviour appear"
+          ],
+          "expected_result": "System handles combination correctly",
+          "risk_level": "medium",
+          "traceability": "Pairwise testing — validates that this specific parameter combination works correctly"
+        },
+        {
+          "id": "PW-006",
+          "type": "pairwise",
+          "scenario_type": "functional",
+          "title": "Combination test — user role = admin, admin session = expires after inactivity, viewport = 320px wide screen, login state = No admin session, export result = Data downloaded",
+          "description": "Covers all 3-way interactions among: ['user role', 'admin session', 'viewport', 'login state', 'export result']",
+          "preconditions": [
+            "The application is open and the relevant screen is loaded"
+          ],
+          "steps": [
+            "Select or enter 'admin' for the 'user role' field",
+            "Select or enter 'expires after inactivity' for the 'admin session' field",
+            "Select or enter '320px wide screen' for the 'viewport' field",
+            "Select or enter 'No admin session' for the 'login state' field",
+            "Select or enter 'Data downloaded' for the 'export result' field",
+            "Submit the form with the settings above",
+            "Observe the result and verify no errors or unexpected behaviour appear"
+          ],
+          "expected_result": "System handles combination correctly",
+          "risk_level": "medium",
+          "traceability": "Pairwise testing — validates that this specific parameter combination works correctly"
+        },
+        {
+          "id": "DT-001",
+          "type": "decision_table",
+          "scenario_type": "functional",
+          "title": "Decision: user has permission=YES, user is authenticated=YES",
+          "description": "Test when: user has permission=YES, user is authenticated=YES",
+          "preconditions": [
+            "System is in a valid ready state"
+          ],
+          "steps": [
+            "Set condition 'user has permission' to TRUE",
+            "Set condition 'user is authenticated' to TRUE",
+            "Execute the operation"
+          ],
+          "expected_result": "Proceed with operation successfully",
+          "risk_level": "medium",
+          "traceability": "Decision table — verifies the correct outcome for this specific combination of conditions"
+        },
+        {
+          "id": "DT-002",
+          "type": "decision_table",
+          "scenario_type": "functional",
+          "title": "Decision: user has permission=YES, user is authenticated=NO",
+          "description": "Test when: user has permission=YES, user is authenticated=NO",
+          "preconditions": [
+            "System is in a valid ready state"
+          ],
+          "steps": [
+            "Set condition 'user has permission' to TRUE",
+            "Set condition 'user is authenticated' to FALSE",
+            "Execute the operation"
+          ],
+          "expected_result": "Undefined – needs specification",
+          "risk_level": "medium",
+          "traceability": "Decision table — verifies the correct outcome for this specific combination of conditions"
+        },
+        {
+          "id": "DT-003",
+          "type": "decision_table",
+          "scenario_type": "functional",
+          "title": "Decision: user has permission=NO, user is authenticated=YES",
+          "description": "Test when: user has permission=NO, user is authenticated=YES",
+          "preconditions": [
+            "System is in a valid ready state"
+          ],
+          "steps": [
+            "Set condition 'user has permission' to FALSE",
+            "Set condition 'user is authenticated' to TRUE",
+            "Execute the operation"
+          ],
+          "expected_result": "Undefined – needs specification",
+          "risk_level": "medium",
+          "traceability": "Decision table — verifies the correct outcome for this specific combination of conditions"
+        },
+        {
+          "id": "DT-004",
+          "type": "decision_table",
+          "scenario_type": "negative",
+          "title": "Decision: user has permission=NO, user is authenticated=NO",
+          "description": "Test when: user has permission=NO, user is authenticated=NO",
+          "preconditions": [
+            "System is in a valid ready state"
+          ],
+          "steps": [
+            "Set condition 'user has permission' to FALSE",
+            "Set condition 'user is authenticated' to FALSE",
+            "Execute the operation"
+          ],
+          "expected_result": "Reject with appropriate error message",
+          "risk_level": "high",
+          "traceability": "Decision table — verifies the correct outcome for this specific combination of conditions"
+        },
+        {
+          "id": "ST-VALID-001",
+          "type": "state_transition",
+          "scenario_type": "functional",
+          "title": "AdminLogin: LOGGED_OUT →[enter_credentials]→ ENTERING_CREDENTIALS",
+          "description": "Verify AdminLogin transitions from 'LOGGED_OUT' to 'ENTERING_CREDENTIALS' when 'enter_credentials' event occurs",
+          "preconditions": [
+            "AdminLogin is in state: LOGGED_OUT"
+          ],
+          "steps": [
+            "Set AdminLogin to state 'LOGGED_OUT'",
+            "Trigger event: 'enter_credentials'",
+            "Verify AdminLogin is now in state 'ENTERING_CREDENTIALS'"
+          ],
+          "expected_result": "State changes from 'LOGGED_OUT' to 'ENTERING_CREDENTIALS'",
+          "risk_level": "medium",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "ST-VALID-002",
+          "type": "state_transition",
+          "scenario_type": "functional",
+          "title": "AdminLogin: ENTERING_CREDENTIALS →[submit]→ AUTHENTICATING",
+          "description": "Verify AdminLogin transitions from 'ENTERING_CREDENTIALS' to 'AUTHENTICATING' when 'submit' event occurs",
+          "preconditions": [
+            "AdminLogin is in state: ENTERING_CREDENTIALS"
+          ],
+          "steps": [
+            "Set AdminLogin to state 'ENTERING_CREDENTIALS'",
+            "Trigger event: 'submit'",
+            "Verify AdminLogin is now in state 'AUTHENTICATING'"
+          ],
+          "expected_result": "State changes from 'ENTERING_CREDENTIALS' to 'AUTHENTICATING'",
+          "risk_level": "medium",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "ST-VALID-003",
+          "type": "state_transition",
+          "scenario_type": "functional",
+          "title": "AdminLogin: AUTHENTICATING →[auth_success]→ AUTHENTICATED",
+          "description": "Verify AdminLogin transitions from 'AUTHENTICATING' to 'AUTHENTICATED' when 'auth_success' event occurs",
+          "preconditions": [
+            "AdminLogin is in state: AUTHENTICATING"
+          ],
+          "steps": [
+            "Set AdminLogin to state 'AUTHENTICATING'",
+            "Trigger event: 'auth_success'",
+            "Verify AdminLogin is now in state 'AUTHENTICATED'"
+          ],
+          "expected_result": "State changes from 'AUTHENTICATING' to 'AUTHENTICATED'",
+          "risk_level": "medium",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "ST-VALID-004",
+          "type": "state_transition",
+          "scenario_type": "functional",
+          "title": "AdminLogin: AUTHENTICATING →[auth_failure]→ AUTHENTICATION_FAILED",
+          "description": "Verify AdminLogin transitions from 'AUTHENTICATING' to 'AUTHENTICATION_FAILED' when 'auth_failure' event occurs",
+          "preconditions": [
+            "AdminLogin is in state: AUTHENTICATING"
+          ],
+          "steps": [
+            "Set AdminLogin to state 'AUTHENTICATING'",
+            "Trigger event: 'auth_failure'",
+            "Verify AdminLogin is now in state 'AUTHENTICATION_FAILED'"
+          ],
+          "expected_result": "State changes from 'AUTHENTICATING' to 'AUTHENTICATION_FAILED'",
+          "risk_level": "medium",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "ST-INVALID-001",
+          "type": "state_transition",
+          "scenario_type": "negative",
+          "title": "AdminLogin: REJECT 'retry' in state 'LOGGED_OUT'",
+          "description": "Verify system rejects 'retry' when AdminLogin is in 'LOGGED_OUT' state",
+          "preconditions": [
+            "AdminLogin is in state: LOGGED_OUT"
+          ],
+          "steps": [
+            "Set AdminLogin to state 'LOGGED_OUT'",
+            "Attempt to trigger event: 'retry'",
+            "Verify AdminLogin remains in state 'LOGGED_OUT'",
+            "Verify appropriate error/rejection response"
+          ],
+          "expected_result": "Event rejected; state remains 'LOGGED_OUT'; error returned",
+          "risk_level": "high",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "ST-INVALID-002",
+          "type": "state_transition",
+          "scenario_type": "negative",
+          "title": "AdminLogin: REJECT 'session_timeout' in state 'LOGGED_OUT'",
+          "description": "Verify system rejects 'session_timeout' when AdminLogin is in 'LOGGED_OUT' state",
+          "preconditions": [
+            "AdminLogin is in state: LOGGED_OUT"
+          ],
+          "steps": [
+            "Set AdminLogin to state 'LOGGED_OUT'",
+            "Attempt to trigger event: 'session_timeout'",
+            "Verify AdminLogin remains in state 'LOGGED_OUT'",
+            "Verify appropriate error/rejection response"
+          ],
+          "expected_result": "Event rejected; state remains 'LOGGED_OUT'; error returned",
+          "risk_level": "high",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "ST-INVALID-003",
+          "type": "state_transition",
+          "scenario_type": "negative",
+          "title": "AdminLogin: REJECT 'max_attempts_exceeded' in state 'LOGGED_OUT'",
+          "description": "Verify system rejects 'max_attempts_exceeded' when AdminLogin is in 'LOGGED_OUT' state",
+          "preconditions": [
+            "AdminLogin is in state: LOGGED_OUT"
+          ],
+          "steps": [
+            "Set AdminLogin to state 'LOGGED_OUT'",
+            "Attempt to trigger event: 'max_attempts_exceeded'",
+            "Verify AdminLogin remains in state 'LOGGED_OUT'",
+            "Verify appropriate error/rejection response"
+          ],
+          "expected_result": "Event rejected; state remains 'LOGGED_OUT'; error returned",
+          "risk_level": "high",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "ST-INVALID-004",
+          "type": "state_transition",
+          "scenario_type": "negative",
+          "title": "AdminLogin: REJECT 'logout' in state 'LOGGED_OUT'",
+          "description": "Verify system rejects 'logout' when AdminLogin is in 'LOGGED_OUT' state",
+          "preconditions": [
+            "AdminLogin is in state: LOGGED_OUT"
+          ],
+          "steps": [
+            "Set AdminLogin to state 'LOGGED_OUT'",
+            "Attempt to trigger event: 'logout'",
+            "Verify AdminLogin remains in state 'LOGGED_OUT'",
+            "Verify appropriate error/rejection response"
+          ],
+          "expected_result": "Event rejected; state remains 'LOGGED_OUT'; error returned",
+          "risk_level": "high",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "ST-SEQ-001",
+          "type": "state_transition",
+          "scenario_type": "functional",
+          "title": "AdminLogin: Sequence [LOGGED_OUT → ENTERING_CREDENTIALS → AUTHENTICATING → AUTHENTICATED]",
+          "description": "End-to-end state sequence test via events: enter_credentials → submit → auth_success",
+          "preconditions": [
+            "AdminLogin is in initial state: LOGGED_OUT"
+          ],
+          "steps": [
+            "Trigger 'enter_credentials'; expect state 'ENTERING_CREDENTIALS'",
+            "Trigger 'submit'; expect state 'AUTHENTICATING'",
+            "Trigger 'auth_success'; expect state 'AUTHENTICATED'"
+          ],
+          "expected_result": "Final state: AUTHENTICATED",
+          "risk_level": "high",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "ST-SEQ-002",
+          "type": "state_transition",
+          "scenario_type": "functional",
+          "title": "AdminLogin: Sequence [LOGGED_OUT → ENTERING_CREDENTIALS → AUTHENTICATING → AUTHENTICATION_FAILED]",
+          "description": "End-to-end state sequence test via events: enter_credentials → submit → auth_failure",
+          "preconditions": [
+            "AdminLogin is in initial state: LOGGED_OUT"
+          ],
+          "steps": [
+            "Trigger 'enter_credentials'; expect state 'ENTERING_CREDENTIALS'",
+            "Trigger 'submit'; expect state 'AUTHENTICATING'",
+            "Trigger 'auth_failure'; expect state 'AUTHENTICATION_FAILED'"
+          ],
+          "expected_result": "Final state: AUTHENTICATION_FAILED",
+          "risk_level": "high",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "ST-INIT-001",
+          "type": "state_transition",
+          "scenario_type": "functional",
+          "title": "AdminLogin: Verify initial state on creation",
+          "description": "",
+          "preconditions": [],
+          "steps": [
+            "Create new AdminLogin instance",
+            "Verify state is 'LOGGED_OUT'"
+          ],
+          "expected_result": "State is 'LOGGED_OUT'",
+          "risk_level": "high",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "ST-FINAL-001",
+          "type": "state_transition",
+          "scenario_type": "functional",
+          "title": "AdminLogin: Verify no transitions from final state 'AUTHENTICATED'",
+          "description": "",
+          "preconditions": [
+            "AdminLogin is in state: AUTHENTICATED"
+          ],
+          "steps": [
+            "Attempt any action on AdminLogin in 'AUTHENTICATED' state",
+            "Verify rejection or no-op"
+          ],
+          "expected_result": "No state change allowed from final state 'AUTHENTICATED'",
+          "risk_level": "high",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "ST-FINAL-002",
+          "type": "state_transition",
+          "scenario_type": "functional",
+          "title": "AdminLogin: Verify no transitions from final state 'LOGGED_OUT'",
+          "description": "",
+          "preconditions": [
+            "AdminLogin is in state: LOGGED_OUT"
+          ],
+          "steps": [
+            "Attempt any action on AdminLogin in 'LOGGED_OUT' state",
+            "Verify rejection or no-op"
+          ],
+          "expected_result": "No state change allowed from final state 'LOGGED_OUT'",
+          "risk_level": "high",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "ST-FINAL-003",
+          "type": "state_transition",
+          "scenario_type": "functional",
+          "title": "AdminLogin: Verify no transitions from final state 'LOCKED_OUT'",
+          "description": "",
+          "preconditions": [
+            "AdminLogin is in state: LOCKED_OUT"
+          ],
+          "steps": [
+            "Attempt any action on AdminLogin in 'LOCKED_OUT' state",
+            "Verify rejection or no-op"
+          ],
+          "expected_result": "No state change allowed from final state 'LOCKED_OUT'",
+          "risk_level": "high",
+          "traceability": "State machine — confirms this transition is handled correctly"
+        },
+        {
+          "id": "TC-FLOW-041",
+          "type": "event_flow",
+          "scenario_type": "functional",
+          "title": "UI — Submit the action through the UI",
+          "description": "Client-side validation runs before the request is sent — required fields are filled, formats are correct, and a loading indicator appears. Input is sanitised to prevent malformed data reaching the server.",
+          "preconditions": [
+            "The application is open and the screen is fully loaded"
+          ],
+          "steps": [
+            "Navigate to the relevant screen or form",
+            "Fill in all required fields with valid input",
+            "Click the submit or confirm button",
+            "Observe the on-screen feedback (loading indicator, success message, or error)"
+          ],
+          "expected_result": "Client-side validation runs before the request is sent — required fields are filled, formats are correct, and a loading indicator appears. Input is sanitised to prevent malformed data reaching the server.",
+          "risk_level": "medium",
+          "traceability": "End-to-end event flow — UI layer verified through the UI"
+        },
+        {
+          "id": "TC-FLOW-042",
+          "type": "event_flow",
+          "scenario_type": "functional",
+          "title": "API — UI submits successfully and receives the correct response",
+          "description": "The authentication token is present and has not expired. The request body matches the expected schema (no missing required fields, correct data types). The caller has not exceeded their rate limit. Business rules are enforced before any data is written.",
+          "preconditions": [
+            "The user is logged in and has the required permissions"
+          ],
+          "steps": [
+            "Perform the action on the screen that triggers the request",
+            "Wait for the response — watch for any loading spinner or progress indicator",
+            "Observe whether a success message, error, or redirect appears",
+            "Check that the UI reflects the correct outcome (no stale data, no generic error page)"
+          ],
+          "expected_result": "The authentication token is present and has not expired. The request body matches the expected schema (no missing required fields, correct data types). The caller has not exceeded their rate limit. Business rules are enforced before any data is written.",
+          "risk_level": "high",
+          "traceability": "End-to-end event flow — API layer verified through the UI"
+        },
+        {
+          "id": "TC-FLOW-043",
+          "type": "event_flow",
+          "scenario_type": "functional",
+          "title": "API — UI submits successfully and receives the correct response",
+          "description": "The authentication token is present and has not expired. The request body matches the expected schema (no missing required fields, correct data types). The caller has not exceeded their rate limit. Business rules are enforced before any data is written.",
+          "preconditions": [
+            "The user is logged in and has the required permissions"
+          ],
+          "steps": [
+            "Perform the action on the screen that triggers the request",
+            "Wait for the response — watch for any loading spinner or progress indicator",
+            "Observe whether a success message, error, or redirect appears",
+            "Check that the UI reflects the correct outcome (no stale data, no generic error page)"
+          ],
+          "expected_result": "The authentication token is present and has not expired. The request body matches the expected schema (no missing required fields, correct data types). The caller has not exceeded their rate limit. Business rules are enforced before any data is written.",
+          "risk_level": "high",
+          "traceability": "End-to-end event flow — API layer verified through the UI"
+        },
+        {
+          "id": "TC-FLOW-044",
+          "type": "event_flow",
+          "scenario_type": "functional",
+          "title": "API — UI submits successfully and receives the correct response",
+          "description": "The authentication token is present and has not expired. The request body matches the expected schema (no missing required fields, correct data types). The caller has not exceeded their rate limit. Business rules are enforced before any data is written.",
+          "preconditions": [
+            "The user is logged in and has the required permissions"
+          ],
+          "steps": [
+            "Perform the action on the screen that triggers the request",
+            "Wait for the response — watch for any loading spinner or progress indicator",
+            "Observe whether a success message, error, or redirect appears",
+            "Check that the UI reflects the correct outcome (no stale data, no generic error page)"
+          ],
+          "expected_result": "The authentication token is present and has not expired. The request body matches the expected schema (no missing required fields, correct data types). The caller has not exceeded their rate limit. Business rules are enforced before any data is written.",
+          "risk_level": "high",
+          "traceability": "End-to-end event flow — API layer verified through the UI"
+        },
+        {
+          "id": "TC-EDGE-001",
+          "type": "edge_case",
+          "scenario_type": "edge",
+          "title": "Access Admin Dashboard without authentication",
+          "description": "Navigate directly to /admin URL while not logged in",
+          "preconditions": [
+            "The system is running and accessible"
+          ],
+          "steps": [
+            "Navigate directly to /admin URL while not logged in",
+            "Submit or trigger the operation",
+            "Observe how the system responds"
+          ],
+          "expected_result": "Redirected to login page; admin dashboard not displayed",
+          "risk_level": "high",
+          "traceability": "Edge case — Security breach; BUG136 – Admin dashboard accessible without auth"
+        },
+        {
+          "id": "TC-EDGE-002",
+          "type": "edge_case",
+          "scenario_type": "edge",
+          "title": "Non-admin direct URL access to Slot Management",
+          "description": "Log in as regular user, then navigate directly to /admin/slot-management URL",
+          "preconditions": [
+            "The system is running and accessible"
+          ],
+          "steps": [
+            "Log in as regular user, then navigate directly to /admin/slot-management URL",
+            "Submit or trigger the operation",
+            "Observe how the system responds"
+          ],
+          "expected_result": "Access denied message and page does not load slot management features",
+          "risk_level": "high",
+          "traceability": "Edge case — Unauthorized access; BUG111 – Non-admin accesses slot management via URL"
+        },
+        {
+          "id": "TC-EDGE-003",
+          "type": "edge_case",
+          "scenario_type": "edge",
+          "title": "Export All Registrations yields empty file",
+          "description": "On All Registrations page, click 'Export' button",
+          "preconditions": [
+            "The system is running and accessible"
+          ],
+          "steps": [
+            "On All Registrations page, click 'Export' button",
+            "Submit or trigger the operation",
+            "Observe how the system responds"
+          ],
+          "expected_result": "Downloaded file contains registration data (non‑empty CSV or appropriate format)",
+          "risk_level": "high",
+          "traceability": "Edge case — Data loss; BUG094 – Export downloads empty file"
+        },
+        {
+          "id": "TC-EDGE-004",
+          "type": "edge_case",
+          "scenario_type": "edge",
+          "title": "Pagination to page 2 does nothing",
+          "description": "On All Registrations page, click pagination control for page 2",
+          "preconditions": [
+            "The system is running and accessible"
+          ],
+          "steps": [
+            "On All Registrations page, click pagination control for page 2",
+            "Submit or trigger the operation",
+            "Observe how the system responds"
+          ],
+          "expected_result": "Records for page 2 are displayed",
+          "risk_level": "high",
+          "traceability": "Edge case — Navigation failure; BUG095 – Pagination not working"
+        },
+        {
+          "id": "TC-EDGE-005",
+          "type": "edge_case",
+          "scenario_type": "edge",
+          "title": "Location filter shows records from other locations",
+          "description": "Apply Location filter set to 'Thiruvanmiyur' on All Registrations page",
+          "preconditions": [
+            "The system is running and accessible"
+          ],
+          "steps": [
+            "Apply Location filter set to 'Thiruvanmiyur' on All Registrations page",
+            "Submit or trigger the operation",
+            "Observe how the system responds"
+          ],
+          "expected_result": "Only records with location 'Thiruvanmiyur' are displayed",
+          "risk_level": "high",
+          "traceability": "Edge case — Incorrect filtering; BUG097 – Location filter shows records from other locations"
+        },
+        {
+          "id": "TC-EDGE-006",
+          "type": "edge_case",
+          "scenario_type": "edge",
+          "title": "XSS payload in Full Name field",
+          "description": "On any form containing Full Name field, enter '<img src=x onerror=alert(1)>' and submit",
+          "preconditions": [
+            "The system is running and accessible"
+          ],
+          "steps": [
+            "On any form containing Full Name field, enter '<img src=x onerror=alert(1)>' and submit",
+            "Submit or trigger the operation",
+            "Observe how the system responds"
+          ],
+          "expected_result": "Input is sanitized; no alert dialog appears; error message if any",
+          "risk_level": "high",
+          "traceability": "Edge case — Cross‑site scripting vulnerability; BUG137 – XSS possible in Full Name field"
+        },
+        {
+          "id": "TC-EDGE-007",
+          "type": "edge_case",
+          "scenario_type": "edge",
+          "title": "SQL injection in My Bookings search",
+          "description": "In My Bookings search box, enter \"' OR 1=1; --\" and execute search",
+          "preconditions": [
+            "The system is running and accessible"
+          ],
+          "steps": [
+            "In My Bookings search box, enter \"' OR 1=1; --\" and execute search",
+            "Submit or trigger the operation",
+            "Observe how the system responds"
+          ],
+          "expected_result": "Search input is sanitized; only matching bookings are returned, not all bookings",
+          "risk_level": "high",
+          "traceability": "Edge case — SQL injection risk; BUG138 – SQL injection in My Bookings search"
+        },
+        {
+          "id": "TC-EDGE-008",
+          "type": "edge_case",
+          "scenario_type": "edge",
+          "title": "Admin session expires after inactivity",
+          "description": "Log in as admin, then remain idle for the configured timeout period",
+          "preconditions": [
+            "The system is running and accessible"
+          ],
+          "steps": [
+            "Log in as admin, then remain idle for the configured timeout period",
+            "Submit or trigger the operation",
+            "Observe how the system responds"
+          ],
+          "expected_result": "Session expires and user is redirected to login page",
+          "risk_level": "high",
+          "traceability": "Edge case — Session management; TC199 – Admin session expires after inactivity"
+        }
+      ],
+      "gherkin_test_cases": [
+        {
+          "feature": "Admin login and authentication screen test cases",
+          "scenario_title": "Successful admin login with valid credentials",
+          "given": [
+            "Given the admin is on the login page",
+            "And the admin enters username \"admin_user\" and password \"SecurePass123\""
+          ],
+          "when": [
+            "When the admin clicks the \"Login\" button"
+          ],
+          "then": [
+            "Then the admin is redirected to the admin dashboard",
+            "And a session token is issued"
+          ],
+          "tags": [
+            "@negative"
+          ]
+        },
+        {
+          "feature": "Admin login and authentication screen test cases",
+          "scenario_title": "Admin login fails when username is empty",
+          "given": [
+            "Given the admin is on the login page",
+            "And the username field is left empty",
+            "And the admin enters password \"SecurePass123\""
+          ],
+          "when": [
+            "When the admin clicks the \"Login\" button"
+          ],
+          "then": [
+            "Then an error message \"Username is required\" is displayed",
+            "And the admin remains on the login page"
+          ],
+          "tags": [
+            "@negative"
+          ]
+        },
+        {
+          "feature": "Admin login and authentication screen test cases",
+          "scenario_title": "Admin login fails when password is empty",
+          "given": [
+            "Given the admin is on the login page",
+            "And the admin enters username \"admin_user\"",
+            "And the password field is left empty"
+          ],
+          "when": [
+            "When the admin clicks the \"Login\" button"
+          ],
+          "then": [
+            "Then an error message \"Password is required\" is displayed",
+            "And the admin remains on the login page"
+          ],
+          "tags": [
+            "@security"
+          ]
+        },
+        {
+          "feature": "Admin login and authentication screen test cases",
+          "scenario_title": "SQL injection attempt in username field is rejected",
+          "given": [
+            "Given the admin is on the login page",
+            "And the admin enters username \"' OR 1=1; --\" and password \"any\""
+          ],
+          "when": [
+            "When the admin clicks the \"Login\" button"
+          ],
+          "then": [
+            "Then the login attempt is rejected with error \"Invalid credentials\"",
+            "And no SQL error is exposed"
+          ],
+          "tags": [
+            "@security"
+          ]
+        },
+        {
+          "feature": "Admin login and authentication screen test cases",
+          "scenario_title": "XSS payload in Full Name field is neutralised",
+          "given": [
+            "Given the admin is on the profile edit page",
+            "And the admin enters Full Name \"<script>alert('xss')</script>\""
+          ],
+          "when": [
+            "When the admin saves the profile"
+          ],
+          "then": [
+            "Then the application sanitizes the input and displays the name as plain text",
+            "And no script execution occurs"
+          ],
+          "tags": [
+            "@negative"
+          ]
+        },
+        {
+          "feature": "Admin login and authentication screen test cases",
+          "scenario_title": "Non‑admin user is redirected to login when accessing admin URL directly",
+          "given": [
+            "Given a non‑admin user is authenticated with username \"regular_user\""
+          ],
+          "when": [
+            "When the user navigates directly to \"/admin/dashboard\""
+          ],
+          "then": [
+            "Then the user is redirected to the login page",
+            "And an access denied message is shown"
+          ],
+          "tags": [
+            "@high-risk"
+          ]
+        },
+        {
+          "feature": "Admin login and authentication screen test cases",
+          "scenario_title": "Admin session expires after configured inactivity timeout",
+          "given": [
+            "Given the admin is logged in and the session timeout is set to 15 minutes",
+            "And the admin has been inactive for 16 minutes"
+          ],
+          "when": [
+            "When the admin attempts to access the admin dashboard"
+          ],
+          "then": [
+            "Then the session is expired and the admin is redirected to the login page",
+            "And a message \"Session expired, please log in again\" is displayed"
+          ],
+          "tags": [
+            "@regression"
+          ]
+        },
+        {
+          "feature": "Admin login and authentication screen test cases",
+          "scenario_title": "Admin can navigate to All Registrations page from the dashboard",
+          "given": [
+            "Given the admin is on the dashboard page"
+          ],
+          "when": [
+            "When the admin selects the \"All Registrations\" link from the navigation menu"
+          ],
+          "then": [
+            "Then the All Registrations page is displayed",
+            "And the page shows a list of registration records"
+          ],
+          "tags": []
+        }
+      ],
+      "security_scenarios": [
+        {
+          "id": "SEC-001",
+          "type": "security",
+          "scenario_type": "security",
+          "attack_class": "CSRF",
+          "title": "CSRF attempt on admin logout endpoint",
+          "preconditions": [
+            "Admin user is authenticated and has a valid session cookie"
+          ],
+          "steps": [
+            "From a malicious third‑party site, craft an HTML form that submits a POST request to /api/admin/auth/logout",
+            "Submit the form automatically (e.g., via JavaScript) without including any anti‑CSRF token",
+            "Observe the HTTP response from the logout endpoint"
+          ],
+          "expected_result": "403 Forbidden — logout request is rejected because the anti‑CSRF token is missing or invalid",
+          "risk_level": "high"
+        },
+        {
+          "id": "SEC-002",
+          "type": "security",
+          "scenario_type": "security",
+          "attack_class": "Sensitive data in error messages",
+          "title": "Login endpoint does not expose internal error details",
+          "preconditions": [
+            "No active admin session"
+          ],
+          "steps": [
+            "Send a POST request to /api/admin/auth/login with a malformed JSON payload (e.g., missing the password field)",
+            "Alternatively, send a payload that triggers a server‑side exception (e.g., extremely long email string)",
+            "Inspect the HTTP status code and response body"
+          ],
+          "expected_result": "A generic error response such as 400 Bad Request or 401 Unauthorized with no stack trace, SQL statements, or file system paths disclosed",
+          "risk_level": "medium"
+        },
+        {
+          "id": "SEC-003",
+          "type": "security",
+          "scenario_type": "security",
+          "attack_class": "Rate limiting / brute-force protection",
+          "title": "Brute‑force protection on admin login",
+          "preconditions": [
+            "Admin login endpoint is reachable"
+          ],
+          "steps": [
+            "Automate 100 POST requests to /api/admin/auth/login using an invalid password for a known admin email within one minute",
+            "Record the HTTP status code for each response"
+          ],
+          "expected_result": "After a configurable threshold (e.g., 5‑10 failed attempts), the server returns 429 Too Many Requests for subsequent attempts, and no successful authentication occurs",
+          "risk_level": "high"
+        },
+        {
+          "id": "SEC-004",
+          "type": "security",
+          "scenario_type": "security",
+          "attack_class": "Mass assignment / parameter pollution",
+          "title": "Extra fields in login request are ignored",
+          "preconditions": [
+            "Valid admin credentials (email and password) are known"
+          ],
+          "steps": [
+            "Send a POST request to /api/admin/auth/login with a JSON body containing the correct email and password plus additional fields such as \"role\": \"superadmin\" and \"is_verified\": true",
+            "Observe the authentication response and any returned token or user profile"
+          ],
+          "expected_result": "Login succeeds based solely on the email/password; the extra fields are ignored and do not alter the authenticated user's role or privileges",
+          "risk_level": "medium"
+        }
+      ],
+      "regression_suite": [
+        {
+          "test_case_id": "REG-001",
+          "test_case_name": "Happy path: admin login and authentication screen test",
+          "module": "Authentication",
+          "reason": "Core functionality must work end-to-end",
+          "priority": "MUST-RUN",
+          "needs_update": false,
+          "update_reason": null,
+          "traces_to": [
+            "trigger:SMOKE"
+          ],
+          "trace": {
+            "trigger": "SMOKE",
+            "why": "Core functionality must work end-to-end",
+            "what_to_verify": "Happy-path smoke — must pass before any other testing"
+          }
+        },
+        {
+          "test_case_id": "REG-002",
+          "test_case_name": "Negative: invalid input rejected for admin login and authentication screen test",
+          "module": "Authentication",
+          "reason": "All invalid inputs return correct error codes",
+          "priority": "MUST-RUN",
+          "needs_update": false,
+          "update_reason": null,
+          "traces_to": [
+            "trigger:NEGATIVE"
+          ],
+          "trace": {
+            "trigger": "NEGATIVE",
+            "why": "All invalid inputs return correct error codes",
+            "what_to_verify": "Negative path — invalid inputs must still be rejected correctly"
+          }
+        },
+        {
+          "test_case_id": "REG-003",
+          "test_case_name": "Auth: unauthorised access blocked for Authentication",
+          "module": "Authentication",
+          "reason": "Unauthenticated/unauthorised requests return 401/403",
+          "priority": "MUST-RUN",
+          "needs_update": false,
+          "update_reason": null,
+          "traces_to": [
+            "trigger:SECURITY"
+          ],
+          "trace": {
+            "trigger": "SECURITY",
+            "why": "Unauthenticated/unauthorised requests return 401/403",
+            "what_to_verify": "Auth boundary — unauthorised access must still be blocked"
+          }
+        },
+        {
+          "test_case_id": "REG-004",
+          "test_case_name": "Concurrent requests: admin login and authentication screen test under parallel load",
+          "module": "Authentication",
+          "reason": "No race conditions or data corruption under concurrency",
+          "priority": "MUST-RUN",
+          "needs_update": false,
+          "update_reason": null,
+          "traces_to": [
+            "trigger:CONCURRENCY"
+          ],
+          "trace": {
+            "trigger": "CONCURRENCY",
+            "why": "No race conditions or data corruption under concurrency",
+            "what_to_verify": "Concurrency risk — re-verify under parallel load"
+          }
+        },
+        {
+          "test_case_id": "REG-005",
+          "test_case_name": "Idempotency: duplicate admin login and authentication screen test request handled",
+          "module": "Authentication",
+          "reason": "Duplicate requests do not cause duplicate side-effects",
+          "priority": "MUST-RUN",
+          "needs_update": false,
+          "update_reason": null,
+          "traces_to": [
+            "trigger:IN SCOPE"
+          ],
+          "trace": {
+            "trigger": "IN SCOPE",
+            "why": "Duplicate requests do not cause duplicate side-effects",
+            "what_to_verify": "Re-run and confirm all assertions pass"
+          }
+        }
+      ],
+      "regression_gherkin": [
+        {
+          "feature": "Regression suite for admin login and authentication screen test",
+          "scenario_title": "Regression – SessionManagement: admin login creates a valid session",
+          "given": [
+            "Given the admin user exists and is active # regression risk: session creation may fail after auth changes",
+            "And no active session exists for the admin"
+          ],
+          "when": [
+            "When the admin submits valid credentials on the login screen"
+          ],
+          "then": [
+            "Then a new session is created in SessionManagement with a valid session ID # traces_to: AC-1.1 | US-001",
+            "And the session is marked as authenticated"
+          ],
+          "tags": [
+            "@regression",
+            "@data-integrity",
+            "@integration"
+          ]
+        },
+        {
+          "feature": "Regression suite for admin login and authentication screen test",
+          "scenario_title": "Regression – TokenService: JWT token issued correctly after admin login",
+          "given": [
+            "Given the token service is reachable and configured # regression risk: token payload could be corrupted by auth changes",
+            "And the admin has no existing token"
+          ],
+          "when": [
+            "When the admin logs in with correct username and password"
+          ],
+          "then": [
+            "Then TokenService returns a signed JWT containing admin role and expiration # traces_to: AC-1.2 | US-001",
+            "And the token signature validates against the public key"
+          ],
+          "tags": [
+            "@regression",
+            "@event-flow",
+            "@integration"
+          ]
+        },
+        {
+          "feature": "Regression suite for admin login and authentication screen test",
+          "scenario_title": "Regression – AuditLog: login attempt is recorded in audit logs",
+          "given": [
+            "Given the audit logging subsystem is enabled and writable # regression risk: audit entries might be omitted after UI changes",
+            "And the audit log for the admin is empty"
+          ],
+          "when": [
+            "When the admin successfully logs in"
+          ],
+          "then": [
+            "Then an audit entry with action \"ADMIN_LOGIN_SUCCESS\" is stored # traces_to: AC-1.3 | US-001",
+            "And the entry includes timestamp and admin identifier"
+          ],
+          "tags": [
+            "@regression",
+            "@integration",
+            "@smoke"
+          ]
+        },
+        {
+          "feature": "Regression suite for admin login and authentication screen test",
+          "scenario_title": "Regression – RateLimiter: login throttling remains effective",
+          "given": [
+            "Given the rate limiter is configured to allow 5 attempts per minute # regression risk: throttling thresholds could be bypassed",
+            "And the admin has performed 5 failed login attempts within the last minute"
+          ],
+          "when": [
+            "When the admin attempts another login with invalid credentials"
+          ],
+          "then": [
+            "Then RateLimiter returns a 429 Too Many Requests response # traces_to: AC-1.4 | US-001",
+            "And the login request is not processed by Authentication"
+          ],
+          "tags": [
+            "@regression",
+            "@integration",
+            "@critical"
+          ]
+        },
+        {
+          "feature": "Regression suite for admin login and authentication screen test",
+          "scenario_title": "Regression – UserDirectory: credentials are validated against the directory service",
+          "given": [
+            "Given the user directory service is online and contains the admin account # regression risk: directory lookup may return stale data",
+            "And the admin password in the directory is unchanged"
+          ],
+          "when": [
+            "When the admin enters the correct password on the login screen"
+          ],
+          "then": [
+            "Then UserDirectory confirms the credentials are valid # traces_to: AC-1.5 | US-001",
+            "And Authentication proceeds to session creation"
+          ],
+          "tags": [
+            "@regression",
+            "@data-integrity",
+            "@integration"
+          ]
+        },
+        {
+          "feature": "Regression suite for admin login and authentication screen test",
+          "scenario_title": "Regression – CacheLayer: authentication cache is invalidated after successful login",
+          "given": [
+            "Given a stale authentication cache entry exists for the admin # regression risk: stale cache could allow unauthorized access",
+            "And the cache TTL has not expired"
+          ],
+          "when": [
+            "When the admin logs in successfully"
+          ],
+          "then": [
+            "Then CacheLayer invalidates the previous auth cache entry for the admin # traces_to: AC-1.6 | US-001",
+            "And a fresh cache entry with updated session data is stored"
+          ],
+          "tags": [
+            "@regression",
+            "@event-flow",
+            "@integration"
+          ]
+        },
+        {
+          "feature": "Regression suite for admin login and authentication screen test",
+          "scenario_title": "Regression – NotificationService: admin receives login success notification",
+          "given": [
+            "Given the notification service endpoint is reachable # regression risk: notification trigger may be lost after UI changes",
+            "And no pending login notifications exist for the admin"
+          ],
+          "when": [
+            "When the admin completes a successful login"
+          ],
+          "then": [
+            "Then NotificationService sends a \"Login Successful\" message to the admin's registered channel # traces_to: AC-1.7 | US-001",
+            "And the notification payload includes timestamp and admin ID"
+          ],
+          "tags": [
+            "@regression",
+            "@integration",
+            "@smoke"
+          ]
+        },
+        {
+          "feature": "Regression suite for admin login and authentication screen test",
+          "scenario_title": "Regression – Analytics: login event is recorded for reporting",
+          "given": [
+            "Given the analytics collector is active and accepting events # regression risk: analytics events might not be emitted",
+            "And no login event for the admin exists for today"
+          ],
+          "when": [
+            "When the admin logs in with valid credentials"
+          ],
+          "then": [
+            "Then an event \"admin_login\" with properties userId and success=true is sent to Analytics # traces_to: AC-1.8 | US-001",
+            "And the event appears in the daily login report."
+          ],
+          "tags": []
+        }
+      ],
+      "test_cases_to_update": [],
+      "missing_coverage": [
+        {
+          "area": "POST /api/admin/auth/login",
+          "gap_type": "untested_flow",
+          "description": "API endpoint 'POST /api/admin/auth/login' has no corresponding test cases",
+          "recommendation": "Add tests for: POST /api/admin/auth/login – 200 success, 400 invalid input, 401 unauthorized, 404 not found, 500 server error"
+        },
+        {
+          "area": "POST /api/admin/auth/logout",
+          "gap_type": "untested_flow",
+          "description": "API endpoint 'POST /api/admin/auth/logout' has no corresponding test cases",
+          "recommendation": "Add tests for: POST /api/admin/auth/logout – 200 success, 400 invalid input, 401 unauthorized, 404 not found, 500 server error"
+        },
+        {
+          "area": "POST /api/admin/auth/refresh",
+          "gap_type": "untested_flow",
+          "description": "API endpoint 'POST /api/admin/auth/refresh' has no corresponding test cases",
+          "recommendation": "Add tests for: POST /api/admin/auth/refresh – 200 success, 400 invalid input, 401 unauthorized, 404 not found, 500 server error"
+        },
+        {
+          "area": "GET /api/admin/auth/me",
+          "gap_type": "untested_flow",
+          "description": "API endpoint 'GET /api/admin/auth/me' has no corresponding test cases",
+          "recommendation": "Add tests for: GET /api/admin/auth/me – 200 success, 400 invalid input, 401 unauthorized, 404 not found, 500 server error"
+        },
+        {
+          "area": "POST /api/admin/auth/forgot-password",
+          "gap_type": "untested_flow",
+          "description": "API endpoint 'POST /api/admin/auth/forgot-password' has no corresponding test cases",
+          "recommendation": "Add tests for: POST /api/admin/auth/forgot-password – 200 success, 400 invalid input, 401 unauthorized, 404 not found, 500 server error"
+        },
+        {
+          "area": "POST /api/admin/auth/reset-password",
+          "gap_type": "untested_flow",
+          "description": "API endpoint 'POST /api/admin/auth/reset-password' has no corresponding test cases",
+          "recommendation": "Add tests for: POST /api/admin/auth/reset-password – 200 success, 400 invalid input, 401 unauthorized, 404 not found, 500 server error"
+        },
+        {
+          "area": "Test type: negative",
+          "gap_type": "missing_test",
+          "description": "No 'negative' test cases exist in the knowledge graph",
+          "recommendation": "No negative test cases found – add invalid input, unauthorised access, and error path tests"
+        },
+        {
+          "area": "Test type: edge",
+          "gap_type": "edge_case",
+          "description": "No 'edge' test cases exist in the knowledge graph",
+          "recommendation": "No edge case tests found – add boundary, empty, null, and overflow scenarios"
+        },
+        {
+          "area": "Test type: security",
+          "gap_type": "edge_case",
+          "description": "No 'security' test cases exist in the knowledge graph",
+          "recommendation": "No security test cases found – add XSS, SQL injection, auth bypass, IDOR tests"
+        },
+        {
+          "area": "Test type: performance",
+          "gap_type": "missing_test",
+          "description": "No 'performance' test cases exist in the knowledge graph",
+          "recommendation": "No performance test cases found – consider load and latency SLA tests for critical APIs"
+        }
+      ],
+      "coverage_metrics": {
+        "feature_coverage_pct": 100.0,
+        "feature_covered": 0,
+        "feature_total": 0,
+        "api_coverage_pct": 0.0,
+        "api_covered": 0,
+        "api_total": 6,
+        "event_coverage_pct": 100.0,
+        "event_covered": 0,
+        "event_total": 0,
+        "state_coverage_pct": 100.0,
+        "state_covered": 0,
+        "state_total": 0,
+        "bug_regression_coverage_pct": 100.0,
+        "bugs_with_regression": 0,
+        "closed_bugs_total": 0,
+        "scenario_type_diversity_pct": 0.0,
+        "scenario_types_present": [],
+        "scenario_types_missing": [
+          "edge",
+          "negative",
+          "performance",
+          "security"
+        ]
+      },
+      "api_event_validation": [
+        {
+          "endpoint": "/api/admin/auth/login",
+          "method": "POST",
+          "validations": [
+            "200: POST /api/admin/auth/login returns 200 with accessToken, refreshToken and admin profile when credentials are valid",
+            "400: POST /api/admin/auth/login returns 400 when required fields (email, password) are missing, empty or have wrong data types",
+            "401: POST /api/admin/auth/login returns 401 when credentials are invalid",
+            "403: POST /api/admin/auth/login returns 403 when the admin account is disabled or lacks required role",
+            "404: POST /api/admin/auth/login returns 404 when the supplied email does not correspond to any admin record",
+            "429: POST /api/admin/auth/login returns 429 after exceeding login attempt rate limit",
+            "500: POST /api/admin/auth/login returns 500 with a safe error code and no stack trace when the database is unavailable",
+            "CSRF: POST /api/admin/auth/login without a valid CSRF token or from a foreign origin returns 403",
+            "Data leakage: error responses (400,401,403,404,500) contain only generic error codes/messages and do not expose stack traces, SQL queries or internal paths",
+            "Cross-tenant: an admin authenticated for tenant A cannot log in to tenant B's admin portal even with valid credentials"
+          ],
+          "event_triggers": [],
+          "db_impacts": [
+            "admins table: SELECT to verify credentials",
+            "sessions table: INSERT to create new access/refresh tokens",
+            "audit_log table: INSERT on every login attempt"
+          ]
+        },
+        {
+          "endpoint": "/api/admin/auth/logout",
+          "method": "POST",
+          "validations": [
+            "200: POST /api/admin/auth/logout returns 200 when the provided access token is successfully revoked",
+            "400: POST /api/admin/auth/logout returns 400 when the request body is malformed or required token identifier is missing",
+            "401: POST /api/admin/auth/logout returns 401 when Authorization header is absent or token is malformed",
+            "403: POST /api/admin/auth/logout returns 403 when the token is valid but belongs to a user without admin privileges",
+            "404: POST /api/admin/auth/logout returns 404 when the token to be revoked does not exist (already revoked)",
+            "429: POST /api/admin/auth/logout returns 429 after exceeding logout request rate limit",
+            "500: POST /api/admin/auth/logout returns 500 with a safe error code when the session store/database fails",
+            "CSRF: POST /api/admin/auth/logout without a valid CSRF token or from a foreign origin returns 403",
+            "Data leakage: error responses do not expose internal stack traces, DB schema or file paths",
+            "Cross-tenant: an admin from tenant A cannot revoke a session token that belongs to tenant B"
+          ],
+          "event_triggers": [],
+          "db_impacts": [
+            "sessions table: DELETE to remove the access token",
+            "audit_log table: INSERT on every logout attempt"
+          ]
+        },
+        {
+          "endpoint": "/api/admin/auth/refresh",
+          "method": "POST",
+          "validations": [
+            "200: POST /api/admin/auth/refresh returns 200 with a new access token when a valid refresh token is supplied",
+            "400: POST /api/admin/auth/refresh returns 400 when the refresh token is missing or has an invalid format",
+            "401: POST /api/admin/auth/refresh returns 401 when the refresh token is malformed or the Authorization header is absent",
+            "403: POST /api/admin/auth/refresh returns 403 when the refresh token is valid but belongs to a user without admin rights",
+            "404: POST /api/admin/auth/refresh returns 404 when the refresh token cannot be found in the store",
+            "429: POST /api/admin/auth/refresh returns 429 after exceeding token refresh rate limit",
+            "500: POST /api/admin/auth/refresh returns 500 with a generic error code when the token store/database is unavailable",
+            "CSRF: POST /api/admin/auth/refresh without a valid CSRF token or from a foreign origin returns 403",
+            "Data leakage: error bodies contain only safe error identifiers, no stack traces or internal details",
+            "Cross-tenant: an admin from tenant A cannot use a refresh token that was issued for tenant B"
+          ],
+          "event_triggers": [],
+          "db_impacts": [
+            "sessions table: SELECT to validate the refresh token",
+            "sessions table: UPDATE to rotate the access token",
+            "audit_log table: INSERT on every token refresh"
+          ]
+        },
+        {
+          "endpoint": "/api/admin/auth/me",
+          "method": "GET",
+          "validations": [
+            "200: GET /api/admin/auth/me returns 200 with the authenticated admin's profile data",
+            "401: GET /api/admin/auth/me returns 401 when the Authorization header is missing or the token is invalid",
+            "403: GET /api/admin/auth/me returns 403 when the token is valid but the user does not have admin role",
+            "500: GET /api/admin/auth/me returns 500 with a safe error code when the user store/database fails",
+            "Data leakage: response on error does not reveal stack traces, SQL statements or internal file paths",
+            "Cross-tenant: an admin authenticated for tenant A cannot retrieve profile information of an admin from tenant B"
+          ],
+          "event_triggers": [],
+          "db_impacts": [
+            "admins table: SELECT to fetch the admin profile",
+            "sessions table: SELECT to validate the access token"
+          ]
+        },
+        {
+          "endpoint": "/api/admin/auth/forgot-password",
+          "method": "POST",
+          "validations": [
+            "200: POST /api/admin/auth/forgot-password returns 200 with a generic success message even if the email does not exist, to prevent enumeration",
+            "400: POST /api/admin/auth/forgot-password returns 400 when the email field is missing, empty or not a valid email format",
+            "429: POST /api/admin/auth/forgot-password returns 429 after exceeding password‑reset request rate limit",
+            "500: POST /api/admin/auth/forgot-password returns 500 with a safe error code when the email service or DB is unavailable",
+            "CSRF: POST /api/admin/auth/forgot-password without a valid CSRF token or from a foreign origin returns 403",
+            "Data leakage: error responses do not expose internal stack traces, DB schema or email service details",
+            "Cross-tenant: an admin from tenant A cannot trigger a password‑reset flow for an email that belongs to tenant B"
+          ],
+          "event_triggers": [],
+          "db_impacts": [
+            "admins table: SELECT to locate the admin by email",
+            "password_resets table: INSERT to store the reset token and expiration",
+            "audit_log table: INSERT on every forgot‑password request"
+          ]
+        },
+        {
+          "endpoint": "/api/admin/auth/reset-password",
+          "method": "POST",
+          "validations": [
+            "200: POST /api/admin/auth/reset-password returns 200 when a valid reset token and new password are provided and the password is updated",
+            "400: POST /api/admin/auth/reset-password returns 400 when required fields (resetToken, newPassword) are missing, empty or have wrong types",
+            "401: POST /api/admin/auth/reset-password returns 401 when the reset token is expired",
+            "403: POST /api/admin/auth/reset-password returns 403 when the reset token is valid but does not belong to an admin or belongs to a different tenant",
+            "404: POST /api/admin/auth/reset-password returns 404 when the reset token cannot be found in the store",
+            "429: POST /api/admin/auth/reset-password returns 429 after exceeding password‑reset attempts rate limit",
+            "500: POST /api/admin/auth/reset-password returns 500 with a generic error code when the user store or password‑reset table is unavailable",
+            "CSRF: POST /api/admin/auth/reset-password without a valid CSRF token or from a foreign origin returns 403",
+            "Data leakage: error bodies contain only safe identifiers, no stack traces or internal DB details",
+            "Cross-tenant: an admin from tenant A cannot use a reset token that was generated for tenant B"
+          ],
+          "event_triggers": [],
+          "db_impacts": [
+            "password_resets table: SELECT to verify the reset token",
+            "admins table: UPDATE to set the new password hash",
+            "password_resets table: DELETE to consume the used token",
+            "audit_log table: INSERT on every password‑reset attempt"
+          ]
+        }
+      ],
+      "user_story": "admin login and authentication  screen test cases ",
+      "feature_name": "admin login and authentication screen test",
+      "detected_module": "Authentication",
+      "detected_priority": "critical",
+      "total_scenarios": 64,
+      "overall_risk": "P2",
+      "complexity_level": "moderate",
+      "feature_status": "partial",
+      "feature_status_reason": "Some prior knowledge found — 10 KB chunk(s), top similarity 64%.",
+      "generated_at": "2026-06-23T13:35:00.690429Z",
+      "graph_stats": {
+        "total_nodes": 0,
+        "total_relationships": 0
+      },
+      "kb_sparse": false,
+      "apis_inferred": true,
+      "grounding_score": 0.457,
+      "grounding_breakdown": {
+        "rag_similarity": 0.642,
+        "kb_chunks_normalised": 0.667,
+        "graph_entities_normalised": 0.0
+      },
+      "token_usage": {
+        "input_tokens": 8078,
+        "output_tokens": 11744
+      }
+    },
+    "timestamp": "2026-06-23T13:35:00.694125+00:00"
+  }
+]

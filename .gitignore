@@ -1,8 +1,4 @@
-# Source code lives in separate repos — ignore local copies
-backend/
-frontend/
 render.yaml
-requirements.txt
 requirements-api.txt
 DOCUMENTATION.md
 
