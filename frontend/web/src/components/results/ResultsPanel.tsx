@@ -518,6 +518,130 @@ export default function ResultsPanel({ result, projectId, revealCount }: { resul
           </Box>
         )}
 
+        {/* Historical Test Cases & Bugs — inserted before Test Scenarios */}
+        {(result.historical_context?.related_test_cases?.length || result.historical_context?.related_bugs?.length) ? (
+          <Box sx={FADE_UP}>
+            <Box sx={{
+              bgcolor: "background.paper",
+              border: "1px solid", borderColor: "divider",
+              borderRadius: "16px", overflow: "hidden",
+            }}>
+              {/* Header */}
+              <Box sx={{
+                display: "flex", alignItems: "center", gap: 2,
+                px: 3, py: 2,
+                borderBottom: "1px solid", borderColor: "divider",
+                bgcolor: "background.default",
+              }}>
+                <Box sx={{ px: "10px", py: "3px", borderRadius: "8px", bgcolor: "#ede9fe" }}>
+                  <Typography sx={{ fontSize: 11, fontWeight: 700, color: "#7c3aed", letterSpacing: "0.05em" }}>FROM KB</Typography>
+                </Box>
+                <Typography sx={{ fontWeight: 700, fontSize: 14, color: "text.primary", flex: 1 }}>
+                  Previous Test Cases &amp; Bugs
+                </Typography>
+                <Box sx={{ px: "10px", py: "3px", borderRadius: "999px", bgcolor: "action.selected", border: "1px solid", borderColor: "divider" }}>
+                  <Typography sx={{ fontSize: 11, fontWeight: 700, color: "text.secondary" }}>
+                    {(result.historical_context?.related_test_cases?.length ?? 0) + (result.historical_context?.related_bugs?.length ?? 0)}
+                  </Typography>
+                </Box>
+              </Box>
+
+              <Box sx={{ p: 3, display: "flex", flexDirection: "column", gap: 3 }}>
+
+                {/* ── Related Test Cases ── */}
+                {(result.historical_context?.related_test_cases?.length ?? 0) > 0 && (
+                  <Box>
+                    <Typography sx={{ fontSize: 11, fontWeight: 700, color: "text.secondary", textTransform: "uppercase", letterSpacing: "0.08em", mb: 1.5 }}>
+                      Related Test Cases
+                    </Typography>
+                    <Box sx={{ borderRadius: "10px", border: "1px solid", borderColor: "divider", overflow: "hidden" }}>
+                      {result.historical_context!.related_test_cases.map((tc, i) => {
+                        const SC: Record<string, { bg: string; text: string }> = {
+                          pass:    { bg: "#dcfce7", text: "#15803d" },
+                          passed:  { bg: "#dcfce7", text: "#15803d" },
+                          fail:    { bg: "#fef2f2", text: "#b91c1c" },
+                          failed:  { bg: "#fef2f2", text: "#b91c1c" },
+                          blocked: { bg: "#fef9c3", text: "#a16207" },
+                        };
+                        const sc = SC[tc.status?.toLowerCase()] ?? { bg: "#f1f5f9", text: "#64748b" };
+                        const last = i === result.historical_context!.related_test_cases.length - 1;
+                        return (
+                          <Box key={i} sx={{
+                            display: "flex", alignItems: "center", gap: 2, px: 2.5, py: 1.5,
+                            borderBottom: last ? "none" : "1px solid", borderColor: "divider",
+                            "&:hover": { bgcolor: "action.hover" }, transition: "background 0.1s",
+                          }}>
+                            <Typography sx={{ fontSize: 11, fontWeight: 700, color: "#6d28d9", fontFamily: "monospace", minWidth: 70, flexShrink: 0 }}>{tc.id}</Typography>
+                            <Typography sx={{ fontSize: 13, color: "text.primary", flex: 1, lineHeight: 1.4 }}>{tc.name}</Typography>
+                            {tc.module && <Typography sx={{ fontSize: 11, color: "text.disabled", flexShrink: 0 }}>{tc.module}</Typography>}
+                            <Box sx={{ px: "8px", py: "2px", borderRadius: "6px", bgcolor: sc.bg, flexShrink: 0 }}>
+                              <Typography sx={{ fontSize: 10, fontWeight: 700, color: sc.text, textTransform: "capitalize" }}>{tc.status || "unknown"}</Typography>
+                            </Box>
+                          </Box>
+                        );
+                      })}
+                    </Box>
+                  </Box>
+                )}
+
+                {/* ── Related Bugs ── */}
+                {(result.historical_context?.related_bugs?.length ?? 0) > 0 && (
+                  <Box>
+                    <Typography sx={{ fontSize: 11, fontWeight: 700, color: "text.secondary", textTransform: "uppercase", letterSpacing: "0.08em", mb: 1.5 }}>
+                      Related Bugs
+                    </Typography>
+                    <Box sx={{ borderRadius: "10px", border: "1px solid", borderColor: "divider", overflow: "hidden" }}>
+                      {result.historical_context!.related_bugs.map((bug, i) => {
+                        const SEV: Record<string, { bg: string; text: string }> = {
+                          critical: { bg: "#fef2f2", text: "#b91c1c" },
+                          blocker:  { bg: "#fef2f2", text: "#b91c1c" },
+                          high:     { bg: "#fff7ed", text: "#c2410c" },
+                          major:    { bg: "#fff7ed", text: "#c2410c" },
+                          medium:   { bg: "#fefce8", text: "#a16207" },
+                          low:      { bg: "#f0fdf4", text: "#15803d" },
+                        };
+                        const STS: Record<string, { bg: string; text: string }> = {
+                          open:     { bg: "#fff7ed", text: "#c2410c" },
+                          reopened: { bg: "#fef2f2", text: "#b91c1c" },
+                          closed:   { bg: "#f0fdf4", text: "#15803d" },
+                          resolved: { bg: "#f0fdf4", text: "#15803d" },
+                          fixed:    { bg: "#dcfce7", text: "#15803d" },
+                        };
+                        const sv  = SEV[(bug.severity || "medium").toLowerCase()] ?? { bg: "#f1f5f9", text: "#64748b" };
+                        const st  = STS[(bug.status   || "open").toLowerCase()]   ?? { bg: "#fef2f2", text: "#b91c1c" };
+                        const last = i === result.historical_context!.related_bugs.length - 1;
+                        return (
+                          <Box key={i} sx={{
+                            display: "flex", alignItems: "flex-start", gap: 2, px: 2.5, py: 1.5,
+                            borderBottom: last ? "none" : "1px solid", borderColor: "divider",
+                            "&:hover": { bgcolor: "action.hover" }, transition: "background 0.1s",
+                          }}>
+                            <Typography sx={{ fontSize: 11, fontWeight: 700, color: "#b91c1c", fontFamily: "monospace", minWidth: 70, flexShrink: 0, pt: "1px" }}>{bug.id}</Typography>
+                            <Box sx={{ flex: 1, minWidth: 0 }}>
+                              <Typography sx={{ fontSize: 13, color: "text.primary", lineHeight: 1.4 }}>{bug.name}</Typography>
+                              {bug.root_cause && (
+                                <Typography sx={{ fontSize: 11, color: "text.disabled", mt: 0.25, lineHeight: 1.4 }}>Root cause: {bug.root_cause}</Typography>
+                              )}
+                            </Box>
+                            {bug.module && <Typography sx={{ fontSize: 11, color: "text.disabled", flexShrink: 0, pt: "1px" }}>{bug.module}</Typography>}
+                            <Box sx={{ px: "8px", py: "2px", borderRadius: "6px", bgcolor: sv.bg, flexShrink: 0 }}>
+                              <Typography sx={{ fontSize: 10, fontWeight: 700, color: sv.text, textTransform: "capitalize" }}>{bug.severity || "medium"}</Typography>
+                            </Box>
+                            <Box sx={{ px: "8px", py: "2px", borderRadius: "6px", bgcolor: st.bg, flexShrink: 0 }}>
+                              <Typography sx={{ fontSize: 10, fontWeight: 700, color: st.text, textTransform: "capitalize" }}>{bug.status || "open"}</Typography>
+                            </Box>
+                          </Box>
+                        );
+                      })}
+                    </Box>
+                  </Box>
+                )}
+
+              </Box>
+            </Box>
+          </Box>
+        ) : null}
+
         {/* 06 Test Scenarios — section 6 */}
         {revealed(6, revealCount) && (
           <Box sx={FADE_UP}>

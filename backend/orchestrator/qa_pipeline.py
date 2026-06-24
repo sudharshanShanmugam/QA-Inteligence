@@ -201,6 +201,7 @@ class QAPipeline:
             feature_name, primary_module.get("name", ""), user_story, all_bugs
         )
         warnings = bug_intelligence.generate_warnings(similar_bugs, user_story)
+        _all_graph_tcs = gq.get_all_test_cases()  # used for historical context
 
         # 2g. Event flow trace (happy path + failure/async paths)
         flow_steps = event_flow_tracer.trace(feature_name, apis, events, [], modules)
@@ -244,6 +245,16 @@ class QAPipeline:
         # Primary retrieval — broad feature context
         rag_result = retriever.retrieve(user_story + " " + feature_name, store=project_store)
         rag_context_str = retriever.build_context_string(rag_result)
+
+        # Historical test cases and bugs — search using the specific user story / feature name
+        # so only relevant items are returned, not everything in the same module.
+        _hist_query  = user_story + " " + feature_name
+        _hist_hits   = project_store.search(_hist_query, top_k=20)
+        _hist_chunks = [h["text"] for h in _hist_hits]
+        _hist_tcs  = self._extract_historical_tcs(
+            _hist_chunks, _all_graph_tcs, feature_name, primary_module.get("name", ""), user_story,
+        )
+        _hist_bugs = self._extract_historical_bugs(similar_bugs, _hist_chunks, feature_name, user_story)
 
         # Targeted retrieval — pulls field names, validation rules, and acceptance criteria
         # from the KB more directly; merged into the context if it adds new content
@@ -457,6 +468,10 @@ class QAPipeline:
                 "rag_similarity": round(_rag_score, 3),
                 "kb_chunks_normalised": round(_kb_score, 3),
                 "graph_entities_normalised": round(_graph_score, 3),
+            },
+            "historical_context": {
+                "related_test_cases": _hist_tcs[:10],
+                "related_bugs": _hist_bugs[:10],
             },
         }
 
@@ -1124,6 +1139,185 @@ class QAPipeline:
         for e in should_run:
             result.append(_make_trace(e, "SHOULD-RUN"))
         return result
+
+    # ── Historical context helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _norm_id(raw: str, default_prefix: str) -> str:
+        """Turn an internal graph slug into a readable ID like TC-193 or BUG-136."""
+        import re as _r
+        m = _r.search(r'(bug|defect|issue|tc|test_?case)[_-]?(\d+)', raw, _r.IGNORECASE)
+        if m:
+            pfx = m.group(1).upper().replace("_", "").replace("TESTCASE", "TC")
+            return f"{pfx}-{m.group(2)}"
+        return raw.upper().replace("_", "-") or default_prefix
+
+    @staticmethod
+    def _feature_keywords(feature_name: str, story_text: str):
+        """
+        Returns (must_words, nice_words).
+        must_words: specific action/entity words; any 1 match → item is relevant.
+        nice_words: broader words; 3+ matches → also relevant.
+        Includes domain synonyms so e.g. 'login' expands to session/credential/bypass.
+        """
+        import re as _r
+        _STOPWORDS = {
+            "the", "a", "an", "is", "as", "for", "to", "in", "on", "of", "and", "or",
+            "but", "with", "that", "this", "be", "have", "it", "not", "are", "was",
+            "from", "by", "at", "into", "user", "want", "wants", "able", "should",
+            "will", "can", "may", "need", "needs", "allow", "allows", "so", "i",
+        }
+        _GENERIC = {"admin", "system", "page", "panel", "screen", "module", "feature",
+                    "test", "case", "verify", "check", "validate"}
+        # Domain synonym expansion — if any seed keyword is present, include its synonyms
+        _SYNONYMS = {
+            "login":    {"session", "credential", "password", "bypass", "timeout", "logout",
+                         "signin", "authenticate", "authentication", "authorize", "credentials"},
+            "register": {"signup", "registration", "onboard", "account", "create"},
+            "checkout": {"payment", "cart", "order", "billing", "transaction"},
+            "search":   {"filter", "query", "results", "keyword", "sort"},
+            "upload":   {"file", "attachment", "import", "ingest"},
+            "export":   {"download", "report", "csv", "excel"},
+        }
+        all_words = set(_r.findall(r'[a-zA-Z]{3,}', (feature_name + " " + story_text).lower()))
+        specific  = all_words - _STOPWORDS - _GENERIC
+        must_words = {w for w in specific if len(w) >= 4}
+        # Expand via synonyms
+        for seed, synonyms in _SYNONYMS.items():
+            if seed in all_words:
+                must_words |= synonyms
+        feat_only  = set(_r.findall(r'[a-zA-Z]{3,}', feature_name.lower())) - _STOPWORDS
+        nice_words = feat_only | (all_words - _STOPWORDS) | must_words
+        return must_words, nice_words
+
+    def _is_relevant(self, text: str, must_words, nice_words, threshold: int = 1) -> bool:
+        """True if text matches at least `threshold` must_words or 3+ nice_words."""
+        words = set(text.lower().split())
+        must_hits = len(must_words & words)
+        nice_hits = len(nice_words & words)
+        return must_hits >= threshold or nice_hits >= 3
+
+    def _extract_historical_tcs(
+        self,
+        rag_chunks: List[str],
+        graph_tcs: List[Dict],
+        feature_name: str,
+        module_name: str,
+        story_text: str,
+    ) -> List[Dict]:
+        """Parse TC-NNN records from RAG text; filter by relevance to the specific feature."""
+        import re as _r
+        must_words, nice_words = self._feature_keywords(feature_name, story_text)
+        seen: set = set()
+        out: List[Dict] = []
+
+        for chunk in rag_chunks:
+            for m in _r.finditer(r'(TC[-_]?\d+)[:\s]+([^\n]{3,120})', chunk, _r.IGNORECASE):
+                tc_id = _r.sub(r'^TC-?', 'TC-', m.group(1).upper().replace('_', '-'))
+                if tc_id in seen:
+                    continue
+                tc_name = m.group(2).strip()
+                # Only include TCs whose name is relevant to the feature being analyzed
+                if not self._is_relevant(tc_name, must_words, nice_words):
+                    continue
+                seen.add(tc_id)
+                window   = chunk[m.start(): m.start() + 500]
+                sts_m    = _r.search(r'status[:\s]+(\w[\w ]*?)(?:\n|$)', window, _r.IGNORECASE)
+                prio_m   = _r.search(r'priority[:\s]+(\w+)', window, _r.IGNORECASE)
+                mod_m    = _r.search(r'module[:\s]+([^\n]+)', window, _r.IGNORECASE)
+                out.append({
+                    "id":       tc_id,
+                    "name":     tc_name,
+                    "status":   sts_m.group(1).strip().lower() if sts_m else "unknown",
+                    "priority": prio_m.group(1).lower() if prio_m else "",
+                    "module":   mod_m.group(1).strip()[:60] if mod_m else "",
+                })
+
+        # Supplement from graph when RAG didn't find enough
+        if len(out) < 3:
+            feat_words  = set(feature_name.lower().split())
+            story_words = set(w for w in story_text.lower().split() if len(w) > 3)
+            mod_l       = module_name.lower()
+            scored = []
+            for tc in graph_tcs:
+                name = (tc.get("name") or "").lower()
+                sc   = 0.0
+                if mod_l and mod_l in name:        sc += 0.35
+                sc += min(0.30, len(feat_words  & set(name.split())) * 0.08)
+                sc += min(0.20, len(story_words & set(name.split())) * 0.04)
+                if sc >= 0.15:
+                    scored.append((sc, tc))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            for _, tc in scored[:8]:
+                gid = tc.get("test_id", self._norm_id(tc.get("id", ""), "TC"))
+                if gid not in seen:
+                    seen.add(gid)
+                    out.append({
+                        "id":       gid,
+                        "name":     tc.get("name", ""),
+                        "status":   tc.get("status", "unknown"),
+                        "priority": tc.get("priority", ""),
+                        "module":   tc.get("module", ""),
+                    })
+        return out
+
+    def _extract_historical_bugs(
+        self,
+        similar_bugs: List[Dict],
+        rag_chunks: List[str],
+        feature_name: str = "",
+        story_text: str = "",
+    ) -> List[Dict]:
+        """Build historical bug list: graph-matched bugs first, then RAG text — filtered by feature relevance."""
+        import re as _r
+        must_words, nice_words = self._feature_keywords(feature_name, story_text) if feature_name else (set(), set())
+        seen: set = set()
+        out:  List[Dict] = []
+
+        for b in similar_bugs:
+            bid  = self._norm_id(b.get("id", ""), "BUG")
+            name = b.get("name", b.get("title", ""))
+            if bid in seen:
+                continue
+            # Filter graph bugs by relevance when we have keywords
+            if must_words and not self._is_relevant(name, must_words, nice_words):
+                continue
+            seen.add(bid)
+            out.append({
+                "id":         bid,
+                "name":       name,
+                "status":     (b.get("status")   or "open").lower(),
+                "severity":   (b.get("severity") or "medium").lower(),
+                "priority":   (b.get("priority") or b.get("severity") or "medium").lower(),
+                "module":     (b.get("module")   or b.get("module_id") or "").strip(),
+                "root_cause": (b.get("root_cause") or "")[:120],
+            })
+
+        for chunk in rag_chunks:
+            for m in _r.finditer(r'(BUG[-_]?\d+|DEFECT[-_]?\d+)[:\s]+([^\n]{3,120})', chunk, _r.IGNORECASE):
+                raw = m.group(1).upper().replace("_", "-")
+                bid = raw if raw[3] == "-" else raw[:3] + "-" + raw[3:]
+                if bid in seen:
+                    continue
+                bug_name = m.group(2).strip()
+                if must_words and not self._is_relevant(bug_name, must_words, nice_words):
+                    continue
+                seen.add(bid)
+                window = chunk[m.start(): m.start() + 400]
+                sev_m  = _r.search(r'severity[:\s]+(\w+)',              window, _r.IGNORECASE)
+                sts_m  = _r.search(r'status[:\s]+(\w[\w ]*?)(?:\n|$)', window, _r.IGNORECASE)
+                pri_m  = _r.search(r'priority[:\s]+(\w+)',              window, _r.IGNORECASE)
+                sev    = sev_m.group(1).lower() if sev_m else "medium"
+                out.append({
+                    "id":         bid,
+                    "name":       bug_name,
+                    "status":     sts_m.group(1).strip().lower() if sts_m else "open",
+                    "severity":   sev,
+                    "priority":   pri_m.group(1).lower() if pri_m else sev,
+                    "module":     "",
+                    "root_cause": "",
+                })
+        return out
 
     def _find_nodes(self, label: str) -> List[Dict]:
         return get_graph().find_nodes(label)
